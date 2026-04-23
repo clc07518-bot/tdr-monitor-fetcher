@@ -1,0 +1,45 @@
+name: TDR Monitor
+
+on:
+  schedule:
+    - cron: '*/3 * * * *'
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: tdr-monitor
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install python deps
+        run: pip install -r requirements.txt
+
+      - name: Setup Google Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Install Playwright runtime deps
+        run: python -m playwright install-deps chromium
+
+      - name: Install Playwright Chromium (fallback)
+        run: python -m playwright install chromium
+
+      - name: Fetch & ingest
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
+          PW_CHANNEL: chrome
+        run: python fetcher.py
