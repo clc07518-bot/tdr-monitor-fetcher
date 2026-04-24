@@ -48,3 +48,36 @@ private repo の GHA 無料枠 (2,000分/月) に収まるよう30分間隔。
 より速い速報性が必要なら:
 - Public repo 化で3分cron無料
 - Cloudflare Workers Cron へ移植 (無料枠10万回/日)
+
+## WP側ダッシュボード & メール通知
+
+`wp-plugin/tdr-mon-dashboard.php` が、
+
+1. ダッシュボード新着ウィジェット（共有ページへの1-tapリンク付き）
+2. メール通知（新着検出時に admin_email へダイジェスト送信・Discord不要）
+
+を提供する。**インストール2択:**
+
+### A. 管理画面からZIPアップロード（推奨）
+
+```
+cd wp-plugin
+zip -r tdr-mon-dashboard.zip tdr-mon-dashboard.php
+```
+
+→ WP管理画面 → **プラグイン → 新規追加 → プラグインのアップロード**
+→ `tdr-mon-dashboard.zip` を選択 → 有効化。
+
+### B. mu-plugins へ直接配置（SFTP利用者向け）
+
+`wp-content/mu-plugins/tdr-mon-dashboard.php` へアップロード。自動有効化・削除不可。
+
+### 通知先メールアドレス変更
+
+デフォルトは `admin_email`。変更したければWPコンソールで:
+
+```sql
+UPDATE wp_options SET option_value='you@example.com' WHERE option_name='tdr_mon_mu_email_to';
+```
+
+もしくは `update_option('tdr_mon_mu_email_to', 'you@example.com')` を一度実行。
