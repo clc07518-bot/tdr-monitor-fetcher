@@ -40,7 +40,11 @@ git push -u origin main
 
 ## スケジュール
 
-`cron: '*/3 * * * *'` (3分間隔)
+`cron: '*/30 * * * *'` (30分間隔)
 
-GitHub Actions の cron は混雑時には遅延することがある（〜数分）。
-速報性が足りなければ Cloudflare Workers Cron へ移植可。
+private repo の GHA 無料枠 (2,000分/月) に収まるよう30分間隔。
+約 1,440分/月の消費で課金ゼロ。
+
+より速い速報性が必要なら:
+- Public repo 化で3分cron無料
+- Cloudflare Workers Cron へ移植 (無料枠10万回/日)

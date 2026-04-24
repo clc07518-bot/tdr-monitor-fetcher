@@ -2,7 +2,9 @@ name: TDR Monitor
 
 on:
   schedule:
-    - cron: '*/3 * * * *'
+    # 30-minute interval keeps monthly GHA usage within the 2,000-min free
+    # tier for private repos (~1,440 min/month at ~1 min/run).
+    - cron: '*/30 * * * *'
   workflow_dispatch:
   push:
     branches: [ main ]

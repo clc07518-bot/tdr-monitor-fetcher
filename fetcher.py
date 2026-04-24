@@ -67,6 +67,19 @@ def render(page, url: str, wait_selector: str, timeout_ms: int = 30000) -> str:
     return page.content()
 
 
+def render_with_retry(page, url: str, wait_selector: str, attempts: int = 2) -> str:
+    last_exc: Exception | None = None
+    for i in range(attempts):
+        try:
+            return render(page, url, wait_selector)
+        except Exception as e:
+            last_exc = e
+            print(f"[warn] {url} attempt {i+1}/{attempts} failed: {e}", file=sys.stderr)
+            if i + 1 < attempts:
+                time.sleep(2)
+    raise last_exc if last_exc else RuntimeError("render failed")
+
+
 def parse_tdr_update(html: str, base_url: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     items = []
@@ -288,7 +301,7 @@ def main() -> int:
             print(f"[fetch] {key} {url}", file=sys.stderr)
             t0 = time.time()
             try:
-                html = render(page, url, wait_sel)
+                html = render_with_retry(page, url, wait_sel)
             except Exception as e:
                 summary[key] = {"error": f"render: {e}"}
                 continue
