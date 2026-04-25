@@ -72,7 +72,42 @@ zip -r tdr-mon-dashboard.zip tdr-mon-dashboard.php
 
 `wp-content/mu-plugins/tdr-mon-dashboard.php` へアップロード。自動有効化・削除不可。
 
-### 通知先メールアドレス変更
+## 「今日のディズニー」ハブ + 待ち時間ヒートマップ
+
+`wp-plugin/tdr-today/` は disney-wait-ranking + TDR Monitor のデータを集約して、
+
+- `[tdr_today_hub park="tdl|tds"]` — 今日の開園時間・天気・混雑グレード・待ち時間TOP10・休止施設・新着ニュースを1画面に集約
+- `[tdr_today_heatmap park="tdl|tds"]` — 今日のアトラクション待ち時間を30分間隔のヒートマップで表示（disneyreal.asumirai.info の「今日これまで」相当）
+
+を提供する short code を追加する。15分間隔で `dwr_latest_*` から自動スナップショットを取って `wp_tdr_wait_history` テーブルに蓄積。
+
+### インストール
+
+```
+cd wp-plugin
+zip -r tdr-today.zip tdr-today/
+```
+
+→ WP管理画面 → **プラグイン → 新規追加 → プラグインのアップロード** → `tdr-today.zip` → 有効化。
+
+### 固定ページに配置
+
+```
+[tdr_today_hub park="tdl"]
+
+<h2>今日のアトラクション待ち時間推移</h2>
+[tdr_today_heatmap park="tdl"]
+```
+
+スラッグ `today-tdl` / `today-tds` で公開すると、shortcode のタブ切替リンクと整合する。
+
+### 蓄積データ
+
+- テーブル `{$wpdb->prefix}tdr_wait_history` に [park, attr_id, wait_min, status, recorded_at, slot_key] を 15分間隔で記録
+- 30〜70 行/15分 = 約 100KB/日 = 35MB/年
+- 1週間溜まると「過去の同じ曜日の待ち時間グラフ」、1ヶ月で「混雑予想モデル」が作れる
+
+## 通知先メールアドレス変更
 
 デフォルトは `admin_email`。変更したければWPコンソールで:
 
