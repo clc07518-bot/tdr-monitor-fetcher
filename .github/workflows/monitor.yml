@@ -39,9 +39,28 @@ jobs:
       - name: Install Playwright Chromium (fallback)
         run: python -m playwright install chromium
 
+      - name: Restore X auto-poster state
+        uses: actions/cache/restore@v4
+        with:
+          path: .x_state.json
+          key: x-state-${{ github.run_id }}
+          restore-keys: |
+            x-state-
+
       - name: Fetch & ingest
         env:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
           PW_CHANNEL: chrome
+          X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
+          X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
         run: python fetcher.py
+
+      - name: Save X auto-poster state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .x_state.json
+          key: x-state-${{ github.run_id }}

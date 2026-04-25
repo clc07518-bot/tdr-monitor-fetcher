@@ -34,6 +34,20 @@ DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 WP_BASE = os.environ.get("WP_BASE", "").rstrip("/")
 TOKEN   = os.environ.get("WP_INGEST_TOKEN", "")
 INGEST  = f"{WP_BASE}/wp-json/tdr-mon/v1/ingest" if WP_BASE else ""
+
+# X (Twitter) auto-poster credentials. Optional — auto-post is skipped when absent.
+X_CK  = os.environ.get("X_CONSUMER_KEY", "")
+X_CS  = os.environ.get("X_CONSUMER_SECRET", "")
+X_AT  = os.environ.get("X_ACCESS_TOKEN", "")
+X_ATS = os.environ.get("X_ACCESS_TOKEN_SECRET", "")
+X_ENABLED = bool(X_CK and X_CS and X_AT and X_ATS) and os.environ.get("X_AUTO_POST", "1") != "0"
+
+# Auto-post safety constraints
+X_DAILY_LIMIT = int(os.environ.get("X_DAILY_LIMIT", "15"))
+X_HOUR_START  = int(os.environ.get("X_HOUR_START", "7"))
+X_HOUR_END    = int(os.environ.get("X_HOUR_END", "23"))
+X_ALLOWED_SOURCES = {"prtimes", "update", "urgent", "olc_tdr"}  # exclude stop_*
+X_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".x_state.json")
 if not DRY_RUN and (not WP_BASE or not TOKEN):
     raise SystemExit("WP_BASE and WP_INGEST_TOKEN required (or set DRY_RUN=1)")
 
@@ -259,6 +273,92 @@ PARSERS: dict[str, Callable[[str, str], list[dict]]] = {
 }
 
 
+def x_load_state() -> dict:
+    try:
+        with open(X_STATE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {"posted_ids": [], "by_date": {}}
+
+
+def x_save_state(state: dict) -> None:
+    try:
+        with open(X_STATE_FILE, "w") as f:
+            json.dump(state, f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[warn] x_save_state: {e}", file=sys.stderr)
+
+
+def post_to_x(item: dict) -> dict:
+    """Post a single item to X with safety constraints.
+
+    Returns: {"posted": bool, "reason": str|None, "tweet_id": str|None}
+    """
+    if not X_ENABLED:
+        return {"posted": False, "reason": "x_disabled"}
+    if item.get("source") not in X_ALLOWED_SOURCES:
+        return {"posted": False, "reason": f"source_filtered:{item.get('source')}"}
+    now = time.localtime()
+    if not (X_HOUR_START <= now.tm_hour < X_HOUR_END):
+        return {"posted": False, "reason": f"out_of_hours:{now.tm_hour}"}
+
+    state = x_load_state()
+    today_key = time.strftime("%Y%m%d", now)
+    today_count = state.get("by_date", {}).get(today_key, 0)
+    if today_count >= X_DAILY_LIMIT:
+        return {"posted": False, "reason": f"daily_limit:{today_count}"}
+
+    item_id = item.get("id", "")
+    if item_id and item_id in state.get("posted_ids", []):
+        return {"posted": False, "reason": "already_posted"}
+
+    title = (item.get("title") or "").strip()
+    url = item.get("url") or ""
+    if not title or not url:
+        return {"posted": False, "reason": "missing_title_or_url"}
+
+    # Compose 280-char-safe text
+    body = f"🆕 TDRニュース速報\n\n{title}\n\n詳細はこちら👇\n{url}\n\n#東京ディズニーリゾート #TDR"
+    if len(body) > 270:
+        # Trim title to fit
+        overflow = len(body) - 270
+        new_title = title[: max(20, len(title) - overflow - 3)] + "…"
+        body = f"🆕 TDRニュース速報\n\n{new_title}\n\n詳細はこちら👇\n{url}\n\n#東京ディズニーリゾート #TDR"
+
+    if DRY_RUN:
+        print(f"[x dry-run] would post: {body[:100]}…", file=sys.stderr)
+        return {"posted": False, "reason": "dry_run", "preview": body}
+
+    try:
+        import tweepy  # imported here so DRY_RUN doesn't require it
+    except ImportError as e:
+        return {"posted": False, "reason": f"tweepy_missing:{e}"}
+
+    try:
+        client = tweepy.Client(
+            consumer_key=X_CK,
+            consumer_secret=X_CS,
+            access_token=X_AT,
+            access_token_secret=X_ATS,
+        )
+        resp = client.create_tweet(text=body)
+        tid = str(resp.data.get("id")) if resp and resp.data else None
+        # Persist state
+        state.setdefault("posted_ids", []).append(item_id)
+        # Cap posted_ids list at 1000
+        if len(state["posted_ids"]) > 1000:
+            state["posted_ids"] = state["posted_ids"][-1000:]
+        state.setdefault("by_date", {})
+        state["by_date"][today_key] = today_count + 1
+        # Prune by_date older than 7 days
+        cutoff = time.strftime("%Y%m%d", time.localtime(time.time() - 7*86400))
+        state["by_date"] = {k: v for k, v in state["by_date"].items() if k >= cutoff}
+        x_save_state(state)
+        return {"posted": True, "tweet_id": tid, "title": title[:60]}
+    except Exception as e:
+        return {"posted": False, "reason": f"api_error:{e}"}
+
+
 def parse_park_calendar(html: str) -> dict[str, dict[str, str]]:
     """Parse /tdr/calendar.html for today's TDL/TDS open/close hours.
 
@@ -438,6 +538,14 @@ def main() -> int:
             print(f"[parse] {key} items={len(unique)}", file=sys.stderr)
             res = ingest(key, unique)
             summary[key] = res
+            if X_ENABLED:
+                x_results = []
+                for it in unique:
+                    r = post_to_x(it)
+                    if r.get("posted"):
+                        x_results.append({"title": r.get("title"), "tweet_id": r.get("tweet_id")})
+                if x_results:
+                    summary.setdefault("x_posts", []).extend(x_results)
 
         # Park calendar (today's TDL/TDS hours)
         try:
