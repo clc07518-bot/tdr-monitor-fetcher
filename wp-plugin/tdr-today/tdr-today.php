@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.0.3
+Version: 1.0.4
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,7 +34,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.0.3'){tdrt_install();update_option('tdrt_v','1.0.3',false);}
+  if(get_option('tdrt_v','0')!=='1.0.4'){tdrt_install();update_option('tdrt_v','1.0.4',false);}
 });
 
 add_filter('cron_schedules',function($s){
@@ -101,7 +101,7 @@ function tdrt_is_open($park){
   return strcmp($now,'08:00')>=0 && strcmp($now,'21:30')<0;
 }
 
-function tdrt_items_by_src($srcs,$lim=10){
+function tdrt_items_by_src($srcs,$lim=100){
   global $wpdb;
   if(!is_array($srcs))$srcs=[$srcs];
   $rows=$wpdb->get_results("SELECT option_id,option_name,option_value FROM {$wpdb->options} WHERE option_name LIKE 'tdr_mon_item_%' ORDER BY option_id DESC LIMIT 200");
@@ -114,6 +114,45 @@ function tdrt_items_by_src($srcs,$lim=10){
     $v['_id']=substr($r->option_name,strlen('tdr_mon_item_'));
     $out[]=$v;
     if(count($out)>=$lim)break;
+  }
+  return $out;
+}
+
+// Parse "...｜2026/5/22" or "...｜2026/3/24 - 2026/5/22" or "...｜2020/7/1 - 未定"
+function tdrt_parse_stop_period($title){
+  if(preg_match('#｜(\d{4})/(\d{1,2})/(\d{1,2})\s*-\s*(\d{4})/(\d{1,2})/(\d{1,2})#u',$title,$m)){
+    return ['start'=>sprintf('%04d-%02d-%02d',(int)$m[1],(int)$m[2],(int)$m[3]),'end'=>sprintf('%04d-%02d-%02d',(int)$m[4],(int)$m[5],(int)$m[6])];
+  }
+  if(preg_match('#｜(\d{4})/(\d{1,2})/(\d{1,2})\s*-\s*未定#u',$title,$m)){
+    return ['start'=>sprintf('%04d-%02d-%02d',(int)$m[1],(int)$m[2],(int)$m[3]),'end'=>null];
+  }
+  if(preg_match('#｜(\d{4})/(\d{1,2})/(\d{1,2})#u',$title,$m)){
+    $d=sprintf('%04d-%02d-%02d',(int)$m[1],(int)$m[2],(int)$m[3]);
+    return ['start'=>$d,'end'=>$d];
+  }
+  return null;
+}
+function tdrt_is_stopped_today($title){
+  $p=tdrt_parse_stop_period($title);
+  if(!$p)return false;
+  $today=wp_date('Y-m-d');
+  if($p['start']>$today)return false;
+  if($p['end']!==null && $p['end']<$today)return false;
+  return true;
+}
+function tdrt_categorize_stop($title){
+  if(strpos($title,'【環境演出】')!==false)return 'show';
+  if(strpos($title,'パレード')!==false)return 'parade';
+  if(preg_match('/ハーモニー|ジュビリー|マジカルミュージック|エレクトリカルパレード|フィルハーマジック|ビリーヴ|パーティグラ|ダイヤモンド|スカイ・フル・オブ・カラーズ|Reach for the Stars|Stars/u',$title))return 'show';
+  return 'attraction';
+}
+function tdrt_filter_stopped_today($items){
+  $out=['attraction'=>[],'show'=>[],'parade'=>[]];
+  foreach($items as $s){
+    $title=$s['title']??'';
+    if(!tdrt_is_stopped_today($title))continue;
+    $cat=tdrt_categorize_stop($title);
+    $out[$cat][]=$s;
   }
   return $out;
 }
@@ -159,7 +198,9 @@ function tdrt_hub($a){
   $h=tdrt_hours($park);$w=tdrt_weather();$g=tdrt_grade($park);
   $tw=tdrt_top_waits($park);
   $is_open=tdrt_is_open($park);
-  $stops=tdrt_items_by_src($park==='tdl'?'stop_tdl':'stop_tds',10);
+  $stops_raw=tdrt_items_by_src($park==='tdl'?'stop_tdl':'stop_tds',100);
+  $stops_today=tdrt_filter_stopped_today($stops_raw);
+  $stops_total=count($stops_today['attraction'])+count($stops_today['show'])+count($stops_today['parade']);
   $news=tdrt_items_by_src(['prtimes','update','urgent','olc_tdr'],5);
   $today=wp_date('Y年n月j日 (D)');
   ob_start();?>
@@ -188,7 +229,7 @@ function tdrt_hub($a){
 <div class="c"><div class="cl">開園時間</div><?php if($h&&isset($h['open'])):?><div class="cv"><?php echo esc_html($h['open']);?></div><div class="cs">~<?php echo esc_html($h['close']??'');?></div><?php else:?><div class="cv">—</div><div class="cs">公式アプリで確認</div><?php endif;?></div>
 <div class="c"><div class="cl">天気</div><?php if($w&&isset($w['daily']['weathercode'][0])):$wc=(int)$w['daily']['weathercode'][0];$tx=round($w['daily']['temperature_2m_max'][0]);$tn=round($w['daily']['temperature_2m_min'][0]);$pp=(int)$w['daily']['precipitation_probability_max'][0];?><div class="cv"><?php echo tdrt_we($wc);?> <?php echo esc_html(tdrt_wl($wc));?></div><div class="cs"><?php echo "{$tn}°/{$tx}° 降水{$pp}%";?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">混雑グレード</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php elseif(!$is_open):?><div class="cv" style="font-size:14px;color:#999">🌙</div><div class="cs">営業時間外</div><?php else:?><div class="cv">—</div><?php endif;?></div>
-<div class="c"><div class="cl">休止施設</div><div class="cv"><?php echo count($stops);?>件</div><div class="cs">下のリスト参照</div></div>
+<div class="c"><div class="cl">休止施設</div><div class="cv"><?php echo $stops_total;?>件</div><div class="cs">下のリスト参照</div></div>
 </div>
 <h3>🔥 待ち時間 TOP 10</h3>
 <?php if($tw):?><ul class="l"><?php foreach($tw as $i=>$r):$nm=$r['name']??'';$wm=isset($r['wait_min'])?(int)$r['wait_min']:-1;$st=$r['status']??'';?>
@@ -198,8 +239,12 @@ function tdrt_hub($a){
 <p style="text-align:right;margin-top:8px"><a href="<?php echo home_url('/'.$park.'-wait-ranking/');?>" style="font-size:12px">全アトラクションを見る →</a></p>
 <?php elseif(!$is_open):?><p style="color:#888;text-align:center;padding:16px;background:#f8f8f8;border-radius:8px">🌙 現在パークは営業時間外です。<br>明日の開園後にリアルタイム待ち時間を表示します。</p>
 <?php else:?><p style="color:#aaa;text-align:center">データ取得中…</p><?php endif;?>
-<h3>🚫 今日の休止施設</h3>
-<?php if($stops):?><ul class="l"><?php foreach(array_slice($stops,0,8) as $s):?><li><div class="n"><?php echo esc_html($s['title']??'');?></div></li><?php endforeach;?></ul><?php else:?><p style="color:#aaa;text-align:center">なし</p><?php endif;?>
+<h3>🚫 今日の休止施設 (<?php echo $stops_total;?>件)</h3>
+<?php $cats=['attraction'=>['🎢','アトラクション'],'show'=>['🎭','ショー'],'parade'=>['🎉','パレード']];
+foreach($cats as $key=>$lbl): if(empty($stops_today[$key]))continue;?>
+<div style="margin-bottom:14px"><div style="font-size:13px;font-weight:600;color:#666;margin-bottom:4px"><?php echo $lbl[0].' '.$lbl[1];?> (<?php echo count($stops_today[$key]);?>)</div>
+<ul class="l"><?php foreach($stops_today[$key] as $s):?><li><div class="n"><?php echo esc_html($s['title']??'');?></div></li><?php endforeach;?></ul></div>
+<?php endforeach; if($stops_total===0):?><p style="color:#aaa;text-align:center">今日休止中の施設はありません</p><?php endif;?>
 <h3>📰 新着ニュース</h3>
 <?php if($news):?><ul class="l"><?php foreach($news as $n):?>
 <li><div style="flex:1"><div style="font-weight:600;font-size:13px;line-height:1.4"><?php echo esc_html($n['title']??'');?></div>
