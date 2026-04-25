@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.0.2
+Version: 1.0.3
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,7 +34,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.0.2'){tdrt_install();update_option('tdrt_v','1.0.2',false);}
+  if(get_option('tdrt_v','0')!=='1.0.3'){tdrt_install();update_option('tdrt_v','1.0.3',false);}
 });
 
 add_filter('cron_schedules',function($s){
@@ -58,6 +58,7 @@ function tdrt_aid($en,$jp){return substr(md5($en!==''?$en:$jp),0,16);}
 function tdrt_snapshot(){
   global $wpdb;$tbl=tdrt_table();$now=current_time('mysql');$slot=tdrt_slot();$n=0;
   foreach(['tdl','tds'] as $park){
+    if(!tdrt_is_open($park))continue; // 閉園中は記録しない（古いキャッシュが永遠に残るため）
     $rows=get_option('dwr_latest_'.$park,[]);if(!is_array($rows))continue;
     foreach($rows as $r){
       $name=isset($r['name'])?(string)$r['name']:'';
@@ -89,6 +90,17 @@ function tdrt_hours($park){
   return null;
 }
 
+// Is park currently within operating hours? Falls back to 8:00-21:30 default.
+function tdrt_is_open($park){
+  $h=tdrt_hours($park);
+  $now=current_time('H:i');
+  if($h && isset($h['open']) && isset($h['close'])){
+    return strcmp($now,$h['open'])>=0 && strcmp($now,$h['close'])<0;
+  }
+  // Fallback: typical TDR hours, with 30-min grace before "fully closed"
+  return strcmp($now,'08:00')>=0 && strcmp($now,'21:30')<0;
+}
+
 function tdrt_items_by_src($srcs,$lim=10){
   global $wpdb;
   if(!is_array($srcs))$srcs=[$srcs];
@@ -107,6 +119,7 @@ function tdrt_items_by_src($srcs,$lim=10){
 }
 
 function tdrt_top_waits($park,$lim=10){
+  if(!tdrt_is_open($park))return [];
   $r=get_option('dwr_latest_'.$park,[]);if(!is_array($r))return [];
   usort($r,function($a,$b){
     $aw=isset($a['wait_min'])?(int)$a['wait_min']:-1;$bw=isset($b['wait_min'])?(int)$b['wait_min']:-1;
@@ -116,6 +129,7 @@ function tdrt_top_waits($park,$lim=10){
 }
 
 function tdrt_grade($park){
+  if(!tdrt_is_open($park))return null;
   $r=get_option('dwr_latest_'.$park,[]);if(!is_array($r)||empty($r))return null;
   $t=[];foreach($r as $x)if(isset($x['wait_min'])&&$x['wait_min']!=='')$t[]=(int)$x['wait_min'];
   if(empty($t))return null;
@@ -144,6 +158,7 @@ function tdrt_hub($a){
   $pc=$park==='tdl'?'#1d4f91':'#0a8aa6';
   $h=tdrt_hours($park);$w=tdrt_weather();$g=tdrt_grade($park);
   $tw=tdrt_top_waits($park);
+  $is_open=tdrt_is_open($park);
   $stops=tdrt_items_by_src($park==='tdl'?'stop_tdl':'stop_tds',10);
   $news=tdrt_items_by_src(['prtimes','update','urgent','olc_tdr'],5);
   $today=wp_date('Y年n月j日 (D)');
@@ -168,11 +183,11 @@ function tdrt_hub($a){
 <a class="<?php echo $park==='tdl'?'ta':'';?>" href="<?php echo home_url('/today-tdl/');?>">🏰 ランド</a>
 <a class="<?php echo $park==='tds'?'ta':'';?>" href="<?php echo home_url('/today-tds/');?>">⚓ シー</a>
 </div>
-<div class="d"><?php echo esc_html($today);?> · <?php echo esc_html($pl);?></div>
+<div class="d"><?php echo esc_html($today);?> · <?php echo esc_html($pl);?><?php if(!$is_open):?> · <span style="color:#999">🌙 営業時間外</span><?php endif;?></div>
 <div class="g">
 <div class="c"><div class="cl">開園時間</div><?php if($h&&isset($h['open'])):?><div class="cv"><?php echo esc_html($h['open']);?></div><div class="cs">~<?php echo esc_html($h['close']??'');?></div><?php else:?><div class="cv">—</div><div class="cs">公式アプリで確認</div><?php endif;?></div>
 <div class="c"><div class="cl">天気</div><?php if($w&&isset($w['daily']['weathercode'][0])):$wc=(int)$w['daily']['weathercode'][0];$tx=round($w['daily']['temperature_2m_max'][0]);$tn=round($w['daily']['temperature_2m_min'][0]);$pp=(int)$w['daily']['precipitation_probability_max'][0];?><div class="cv"><?php echo tdrt_we($wc);?> <?php echo esc_html(tdrt_wl($wc));?></div><div class="cs"><?php echo "{$tn}°/{$tx}° 降水{$pp}%";?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
-<div class="c"><div class="cl">混雑グレード</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php else:?><div class="cv">—</div><?php endif;?></div>
+<div class="c"><div class="cl">混雑グレード</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php elseif(!$is_open):?><div class="cv" style="font-size:14px;color:#999">🌙</div><div class="cs">営業時間外</div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">休止施設</div><div class="cv"><?php echo count($stops);?>件</div><div class="cs">下のリスト参照</div></div>
 </div>
 <h3>🔥 待ち時間 TOP 10</h3>
@@ -181,6 +196,7 @@ function tdrt_hub($a){
 <?php if($st&&$st!=='operating'):?><div class="w ws">休止</div><?php elseif($wm>=0):?><div class="w"><?php echo $wm;?><small>分</small></div><?php else:?><div class="w ws">—</div><?php endif;?></li>
 <?php endforeach;?></ul>
 <p style="text-align:right;margin-top:8px"><a href="<?php echo home_url('/'.$park.'-wait-ranking/');?>" style="font-size:12px">全アトラクションを見る →</a></p>
+<?php elseif(!$is_open):?><p style="color:#888;text-align:center;padding:16px;background:#f8f8f8;border-radius:8px">🌙 現在パークは営業時間外です。<br>明日の開園後にリアルタイム待ち時間を表示します。</p>
 <?php else:?><p style="color:#aaa;text-align:center">データ取得中…</p><?php endif;?>
 <h3>🚫 今日の休止施設</h3>
 <?php if($stops):?><ul class="l"><?php foreach(array_slice($stops,0,8) as $s):?><li><div class="n"><?php echo esc_html($s['title']??'');?></div></li><?php endforeach;?></ul><?php else:?><p style="color:#aaa;text-align:center">なし</p><?php endif;?>
@@ -216,8 +232,8 @@ function tdrt_heatmap($a){
 <style>.thm{overflow-x:auto;margin:16px 0;-webkit-overflow-scrolling:touch}
 .thm table{border-collapse:collapse;font-size:11px;background:#fff}
 .thm th,.thm td{border:1px solid #ddd;text-align:center;padding:4px 6px;min-width:36px;white-space:nowrap}
-.thm thead th{background:#2a2a3a;color:#fff;writing-mode:vertical-rl;transform:rotate(180deg);padding:8px 4px;font-weight:600;max-width:30px;height:110px;line-height:1.1}
-.thm thead th:first-child{writing-mode:initial;transform:none;max-width:none;min-width:50px;height:auto}
+.thm thead th{background:#2a2a3a;color:#fff;writing-mode:vertical-rl;text-orientation:mixed;padding:8px 4px;font-weight:600;max-width:32px;height:120px;line-height:1.15}
+.thm thead th:first-child{writing-mode:initial;text-orientation:initial;max-width:none;min-width:50px;height:auto}
 .thm tbody th{background:#f5f5f5;text-align:right;padding-right:6px;font-weight:500;position:sticky;left:0}
 .h0{background:#fafafa;color:#ccc}.h1{background:#fff}.h2{background:#e0f2ff}.h3{background:#fff8b3}.h4{background:#ffd699}.h5{background:#ff9999}.h6{background:#cc4444;color:#fff;font-weight:600}
 .thml{font-size:11px;color:#666;margin-bottom:6px}.thml span{display:inline-block;padding:2px 8px;border-radius:3px;margin-right:4px;border:1px solid #ddd}</style>
