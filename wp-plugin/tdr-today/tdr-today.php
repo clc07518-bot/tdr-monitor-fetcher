@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.0.8
+Version: 1.0.9
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,7 +34,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.0.8'){tdrt_install();update_option('tdrt_v','1.0.8',false);}
+  if(get_option('tdrt_v','0')!=='1.0.9'){tdrt_install();update_option('tdrt_v','1.0.9',false);}
 });
 
 add_filter('cron_schedules',function($s){
@@ -230,12 +230,21 @@ function tdrt_weather(){
 function tdrt_we($c){if($c===0)return'☀️';if($c<=3)return'🌤';if($c===45||$c===48)return'🌫';if($c<=67)return'🌧';if($c<=77)return'❄️';if($c<=82)return'🌧';if($c>=95)return'⛈';return'☁️';}
 function tdrt_wl($c){if($c===0)return'快晴';if($c<=3)return'曇り';if($c<=48)return'霧';if($c<=67)return'雨';if($c<=77)return'雪';if($c<=82)return'にわか雨';return'雷雨';}
 
+// "8:15" + 15 = "8:30"
+function tdrt_add_minutes($time_str, $mins){
+  if(!preg_match('/^(\d{1,2}):(\d{2})$/', $time_str, $m)) return $time_str;
+  $total = (int)$m[1] * 60 + (int)$m[2] + (int)$mins;
+  $hh = floor($total / 60);
+  $mm = $total % 60;
+  return sprintf('%d:%02d', $hh, $mm);
+}
+
 function tdrt_hub($a){
   $a=shortcode_atts(['park'=>'tdl'],$a,'tdr_today_hub');
   $park=strtolower($a['park'])==='tds'?'tds':'tdl';
   $pl=$park==='tdl'?'東京ディズニーランド':'東京ディズニーシー';
   $pc=$park==='tdl'?'#1d4f91':'#0a8aa6';
-  $h=tdrt_hours($park);$he=tdrt_fetch_happy_entry();$he_time=$he[$park]??null;$w=tdrt_weather();$g=tdrt_grade($park);
+  $h=tdrt_hours($park);$he=tdrt_fetch_happy_entry();$he_time=$he[$park]??null;$open_eff=$he_time?tdrt_add_minutes($he_time,15):($h['open']??null);$close_eff=$h['close']??null;$w=tdrt_weather();$g=tdrt_grade($park);
   $tw=tdrt_top_waits($park);
   $is_open=tdrt_is_open($park);
   $stops_raw=tdrt_items_by_src($park==='tdl'?'stop_tdl':'stop_tds',100);
@@ -265,7 +274,7 @@ function tdrt_hub($a){
 </div>
 <div class="d"><?php echo esc_html($today);?> · <?php echo esc_html($pl);?><?php if(!$is_open):?> · <span style="color:#999">🌙 営業時間外</span><?php endif;?></div>
 <div class="g">
-<div class="c"><div class="cl">運営時間</div><?php if($h&&isset($h['open'])):?><div class="cv" style="font-size:16px"><?php echo esc_html($h['open']);?>〜<?php echo esc_html($h['close']??'');?></div><?php else:?><div class="cv">—</div><?php endif;?><?php if($he_time):?><div class="cs" style="margin-top:6px">🌅 <strong>HE <?php echo esc_html($he_time);?></strong></div><?php endif;?></div>
+<div class="c"><div class="cl">運営時間</div><?php if($open_eff):?><div class="cv" style="font-size:16px"><?php echo esc_html($open_eff);?>〜<?php echo esc_html($close_eff??'');?></div><?php else:?><div class="cv">—</div><?php endif;?><?php if($he_time):?><div class="cs" style="margin-top:6px">🌅 <strong>HE <?php echo esc_html($he_time);?></strong></div><?php endif;?></div>
 <div class="c"><div class="cl">天気</div><?php if($w&&isset($w['daily']['weathercode'][0])):$wc=(int)$w['daily']['weathercode'][0];$tx=round($w['daily']['temperature_2m_max'][0]);$tn=round($w['daily']['temperature_2m_min'][0]);$pp=(int)$w['daily']['precipitation_probability_max'][0];?><div class="cv"><?php echo tdrt_we($wc);?> <?php echo esc_html(tdrt_wl($wc));?></div><div class="cs"><?php echo "{$tn}°/{$tx}° 降水{$pp}%";?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">混雑度</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php elseif(!$is_open):?><div class="cv" style="font-size:14px;color:#999">🌙</div><div class="cs">営業時間外</div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">休止施設</div><div class="cv"><?php echo $stops_total;?>件</div><div class="cs">下のリスト参照</div></div>
