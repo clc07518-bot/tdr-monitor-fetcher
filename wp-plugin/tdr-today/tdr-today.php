@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.2.0
+Version: 1.2.1
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,7 +34,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.2.0'){tdrt_install();update_option('tdrt_v','1.2.0',false);}
+  if(get_option('tdrt_v','0')!=='1.2.1'){tdrt_install();update_option('tdrt_v','1.2.1',false);}
 });
 
 add_filter('cron_schedules',function($s){
@@ -309,7 +309,7 @@ foreach($cats as $key=>$lbl): if(empty($lbl[2]))continue;?>
 <?php endforeach; if($stops_total===0):?><p style="color:#aaa;text-align:center">今日休止中の施設はありません</p><?php endif;?>
 
 <?php $shows=tdrt_get_shows($park); if($shows): ?>
-<h3>🎭 ショー・パレード スケジュール</h3>
+<h3>🎭 <?php echo $park==='tdl'?'ショー・パレード':'ショー';?> スケジュール</h3>
 <ul class="l">
 <?php
 usort($shows, function($a,$b){
