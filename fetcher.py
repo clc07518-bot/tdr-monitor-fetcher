@@ -55,6 +55,13 @@ PRTIMES_RDF = "https://prtimes.jp/companyrdf.php?company_id=119340"
 PARK_CALENDAR_URL = "https://www.tokyodisneyresort.jp/tdr/calendar.html"
 PARK_HOURS_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/park-hours" if WP_BASE else ""
 
+# Show / parade daily schedules (per-park).
+SHOW_SCHEDULE_URLS = {
+    "tdl": "https://www.tokyodisneyresort.jp/tdl/daily/calendar.html",
+    "tds": "https://www.tokyodisneyresort.jp/tds/daily/calendar.html",
+}
+SHOWS_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/shows" if WP_BASE else ""
+
 
 def stable_id(source: str, url: str, title: str = "") -> str:
     return hashlib.sha1(f"{source}|{url}|{title}".encode()).hexdigest()[:16]
@@ -275,6 +282,67 @@ def parse_park_calendar(html: str) -> dict[str, dict[str, str]]:
     return result
 
 
+def parse_show_schedule(html: str) -> list[dict]:
+    """Parse /{tdl|tds}/daily/calendar.html for today's show/parade times.
+
+    Returns: [{"name": ..., "times": ["15:00", "20:35"], "category": "show|parade"}, ...]
+    Excludes character greetings (lines whose name contains グリーティング etc.).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[dict] = []
+    for li in soup.select(".linkList33 li"):
+        name_el = li.select_one(".heading3")
+        if not name_el:
+            continue
+        name = name_el.get_text(strip=True)
+        # Filter character greetings
+        if any(k in name for k in ("グリーティング", "ハウス前", "ガジェット", "アリス", "プルート", "ミニーの家")):
+            continue
+        # Collect timetables — each .timetable may have multiple times separated by "/"
+        # Skip entries whose timetable looks like "9:00 - 21:00" (operating-hour range, not show times)
+        times: list[str] = []
+        is_range = False
+        import re as _re
+        for tt in li.select(".timetable"):
+            txt = tt.get_text(" ", strip=True)
+            # Detect range separator (greeting attractions have "HH:MM - HH:MM")
+            if _re.search(r"\d{1,2}:\d{2}\s*[-〜～]\s*\d{1,2}:\d{2}", txt):
+                is_range = True
+                break
+            for part in txt.replace("／", "/").split("/"):
+                part = part.strip()
+                for m in _re.findall(r"(\d{1,2}:\d{2})", part):
+                    times.append(m)
+        if is_range or not times:
+            continue
+        # Categorize
+        if "パレード" in name or "ドリームライツ" in name:
+            cat = "parade"
+        else:
+            cat = "show"
+        out.append({"name": name, "times": times, "category": cat})
+    return out
+
+
+def ingest_show_schedule(per_park: dict[str, list[dict]]) -> dict[str, Any]:
+    if not per_park or not any(per_park.values()):
+        return {"endpoint": "shows", "skipped": "no shows parsed"}
+    if DRY_RUN:
+        return {"endpoint": "shows", "dry_run": True, "counts": {k: len(v) for k, v in per_park.items()}}
+    payload = {**per_park, "date": time.strftime("%Y%m%d", time.localtime())}
+    r = requests.post(
+        SHOWS_INGEST,
+        headers={"X-TDR-Token": TOKEN, "Content-Type": "application/json"},
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        timeout=15,
+    )
+    try:
+        body = r.json()
+    except Exception:
+        body = {"raw": r.text[:300]}
+    return {"endpoint": "shows", "status": r.status_code, **body}
+
+
 def ingest_park_hours(hours: dict[str, dict[str, str]]) -> dict[str, Any]:
     if not hours:
         return {"endpoint": "park-hours", "skipped": "no hours parsed"}
@@ -383,6 +451,21 @@ def main() -> int:
                 summary["park_hours"] = ingest_park_hours(hours)
             except Exception as e:
                 summary["park_hours"] = {"error": f"parse: {e}"}
+
+        # Show / parade schedules per park
+        shows: dict[str, list[dict]] = {}
+        for park, url in SHOW_SCHEDULE_URLS.items():
+            try:
+                html_show = render_with_retry(page, url, ".linkList33")
+                shows[park] = parse_show_schedule(html_show)
+                print(f"[parse] shows {park}: {len(shows[park])} items", file=sys.stderr)
+            except Exception as e:
+                print(f"[warn] shows {park}: {e}", file=sys.stderr)
+                shows[park] = []
+        try:
+            summary["shows"] = ingest_show_schedule(shows)
+        except Exception as e:
+            summary["shows"] = {"error": f"ingest: {e}"}
 
         browser.close()
 

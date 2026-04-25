@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.1.0
+Version: 1.2.0
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,7 +34,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.1.0'){tdrt_install();update_option('tdrt_v','1.1.0',false);}
+  if(get_option('tdrt_v','0')!=='1.2.0'){tdrt_install();update_option('tdrt_v','1.2.0',false);}
 });
 
 add_filter('cron_schedules',function($s){
@@ -197,6 +197,13 @@ function tdrt_filter_stopped_today($items){
   return $out;
 }
 
+function tdrt_get_shows($park){
+  $today_ymd = wp_date('Ymd');
+  $stored = get_option('tdrt_shows_'.$today_ymd, null);
+  if(!is_array($stored)) return [];
+  return isset($stored[$park]) && is_array($stored[$park]) ? $stored[$park] : [];
+}
+
 function tdrt_top_waits($park,$lim=10){
   if(!tdrt_is_open($park))return [];
   $r=get_option('dwr_latest_'.$park,[]);if(!is_array($r))return [];
@@ -300,6 +307,34 @@ foreach($cats as $key=>$lbl): if(empty($lbl[2]))continue;?>
 <div style="margin-bottom:14px"><div style="font-size:13px;font-weight:600;color:#666;margin-bottom:4px"><?php echo $lbl[0].' '.$lbl[1];?> (<?php echo count($lbl[2]);?>)</div>
 <ul class="l"><?php foreach($lbl[2] as $s):?><li><div class="n"><?php echo esc_html($s['title']??'');?></div></li><?php endforeach;?></ul></div>
 <?php endforeach; if($stops_total===0):?><p style="color:#aaa;text-align:center">今日休止中の施設はありません</p><?php endif;?>
+
+<?php $shows=tdrt_get_shows($park); if($shows): ?>
+<h3>🎭 ショー・パレード スケジュール</h3>
+<ul class="l">
+<?php
+usort($shows, function($a,$b){
+  $cat_order=function($c){return $c==='parade'?0:1;};
+  $oa=$cat_order($a['category']??'show'); $ob=$cat_order($b['category']??'show');
+  if($oa!==$ob) return $oa-$ob;
+  $ta=$a['times'][0]??'99:99'; $tb=$b['times'][0]??'99:99';
+  return strcmp($ta,$tb);
+});
+foreach($shows as $sh):
+  $icon = ($sh['category']??'show')==='parade' ? '🎉' : '🎭';
+  $times = $sh['times']??[];
+?>
+<li>
+  <div style="font-size:14px;line-height:1.3;flex:1">
+    <span style="margin-right:6px"><?php echo $icon;?></span><?php echo esc_html($sh['name']??'');?>
+  </div>
+  <div style="font-weight:700;font-size:13px;color:<?php echo $pc;?>;text-align:right;min-width:100px">
+    <?php echo esc_html(implode(' / ', $times));?>
+  </div>
+</li>
+<?php endforeach; ?>
+</ul>
+<?php endif; ?>
+
 <div class="cta">
 <a class="cp" href="<?php echo home_url('/calendar/');?>">📅 混雑予想</a>
 <a href="<?php echo home_url('/'.$park.'-wait-ranking/');?>">⏱ 待ち時間</a>
@@ -343,6 +378,52 @@ function tdrt_heatmap($a){
 <?php return ob_get_clean();
 }
 add_shortcode('tdr_today_heatmap','tdrt_heatmap');
+
+// REST: /tdr-today/v1/shows — accepts {tdl:[{name,times,category}], tds:[...], date:Ymd}
+add_action('rest_api_init', function(){
+  register_rest_route('tdr-today/v1', '/shows', [
+    'methods' => 'POST',
+    'permission_callback' => function($req){
+      $token = (string) $req->get_header('x-tdr-token');
+      $expected = (string) get_option('tdr_mon_ingest_token', '');
+      return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+    },
+    'callback' => function($req){
+      $body = $req->get_json_params();
+      if(!is_array($body)) return new WP_Error('bad_json', 'expected JSON', ['status'=>400]);
+      $date = isset($body['date']) ? preg_replace('/[^0-9]/', '', (string)$body['date']) : wp_date('Ymd');
+      if(strlen($date) !== 8) return new WP_Error('bad_date', 'date must be Ymd', ['status'=>400]);
+      $out = [];
+      foreach(['tdl','tds'] as $park){
+        if(isset($body[$park]) && is_array($body[$park])){
+          $clean = [];
+          foreach($body[$park] as $row){
+            if(!is_array($row) || empty($row['name'])) continue;
+            $clean[] = [
+              'name' => (string)$row['name'],
+              'times' => isset($row['times']) && is_array($row['times']) ? array_values(array_map('strval', $row['times'])) : [],
+              'category' => isset($row['category']) ? (string)$row['category'] : 'show',
+            ];
+          }
+          $out[$park] = $clean;
+        }
+      }
+      $opt_key = 'tdrt_shows_'.$date;
+      $serialized = serialize($out);
+      global $wpdb;
+      $existing = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $opt_key));
+      if($existing){
+        $wpdb->update($wpdb->options, ['option_value'=>$serialized,'autoload'=>'no'], ['option_name'=>$opt_key], ['%s','%s'], ['%s']);
+      } else {
+        $wpdb->insert($wpdb->options, ['option_name'=>$opt_key,'option_value'=>$serialized,'autoload'=>'no'], ['%s','%s','%s']);
+      }
+      wp_cache_delete($opt_key, 'options');
+      $cutoff = wp_date('Ymd', time() - 7*DAY_IN_SECONDS);
+      $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'tdrt_shows_%' AND SUBSTRING(option_name, 12, 8) < %s", $cutoff));
+      return ['ok' => true, 'date' => $date, 'counts' => array_map('count', $out)];
+    },
+  ]);
+});
 
 // REST: /tdr-today/v1/park-hours — accepts {tdl:{open,close},tds:{open,close},date:Ymd}
 // Used by fetcher.py to populate today's official park hours (since calendar.html is Akamai-protected).
