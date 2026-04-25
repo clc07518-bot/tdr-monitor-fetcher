@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.0.9
+Version: 1.1.0
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,7 +34,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.0.9'){tdrt_install();update_option('tdrt_v','1.0.9',false);}
+  if(get_option('tdrt_v','0')!=='1.1.0'){tdrt_install();update_option('tdrt_v','1.1.0',false);}
 });
 
 add_filter('cron_schedules',function($s){
@@ -275,7 +275,7 @@ function tdrt_hub($a){
 <div class="d"><?php echo esc_html($today);?> · <?php echo esc_html($pl);?><?php if(!$is_open):?> · <span style="color:#999">🌙 営業時間外</span><?php endif;?></div>
 <div class="g">
 <div class="c"><div class="cl">運営時間</div><?php if($open_eff):?><div class="cv" style="font-size:16px"><?php echo esc_html($open_eff);?>〜<?php echo esc_html($close_eff??'');?></div><?php else:?><div class="cv">—</div><?php endif;?><?php if($he_time):?><div class="cs" style="margin-top:6px">🌅 <strong>HE <?php echo esc_html($he_time);?></strong></div><?php endif;?></div>
-<div class="c"><div class="cl">天気</div><?php if($w&&isset($w['daily']['weathercode'][0])):$wc=(int)$w['daily']['weathercode'][0];$tx=round($w['daily']['temperature_2m_max'][0]);$tn=round($w['daily']['temperature_2m_min'][0]);$pp=(int)$w['daily']['precipitation_probability_max'][0];?><div class="cv"><?php echo tdrt_we($wc);?> <?php echo esc_html(tdrt_wl($wc));?></div><div class="cs"><?php echo "{$tn}°/{$tx}° 降水{$pp}%";?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
+<div class="c"><div class="cl">天気</div><?php if($w&&isset($w['daily']['weathercode'][0])):$wc=(int)$w['daily']['weathercode'][0];$tx=round($w['daily']['temperature_2m_max'][0]);$tn=round($w['daily']['temperature_2m_min'][0]);$pp=(int)$w['daily']['precipitation_probability_max'][0];?><div class="cv"><?php echo tdrt_we($wc);?> <?php echo esc_html(tdrt_wl($wc));?></div><div class="cs"><?php echo "{$tn}℃/{$tx}℃　降水{$pp}%";?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">混雑度</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php elseif(!$is_open):?><div class="cv" style="font-size:14px;color:#999">🌙</div><div class="cs">営業時間外</div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">休止施設</div><div class="cv"><?php echo $stops_total;?>件</div><div class="cs">下のリスト参照</div></div>
 </div>
