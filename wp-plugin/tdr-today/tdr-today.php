@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.0.4
+Version: 1.0.7
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,7 +34,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.0.4'){tdrt_install();update_option('tdrt_v','1.0.4',false);}
+  if(get_option('tdrt_v','0')!=='1.0.7'){tdrt_install();update_option('tdrt_v','1.0.7',false);}
 });
 
 add_filter('cron_schedules',function($s){
@@ -58,7 +58,7 @@ function tdrt_aid($en,$jp){return substr(md5($en!==''?$en:$jp),0,16);}
 function tdrt_snapshot(){
   global $wpdb;$tbl=tdrt_table();$now=current_time('mysql');$slot=tdrt_slot();$n=0;
   foreach(['tdl','tds'] as $park){
-    if(!tdrt_is_open($park))continue; // 閉園中は記録しない（古いキャッシュが永遠に残るため）
+    if(!tdrt_is_open($park))continue; // 閉園中は記録しない
     $rows=get_option('dwr_latest_'.$park,[]);if(!is_array($rows))continue;
     foreach($rows as $r){
       $name=isset($r['name'])?(string)$r['name']:'';
@@ -79,7 +79,48 @@ function tdrt_snapshot(){
 }
 add_action('tdrt_snapshot','tdrt_snapshot');
 
+// Fetch Happy Entry CSV (plain HTTP) → returns ['tdl'=>'8:45','tds'=>'8:15'] for today, or null
+function tdrt_fetch_happy_entry(){
+  $cached = get_transient('tdrt_he');
+  if($cached !== false) return $cached;
+  $url = 'https://information.disneyhotels.jp/happyentry/csv_list/entry.csv';
+  $r = wp_remote_get($url, [
+    'timeout' => 10,
+    'headers' => [
+      'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Referer' => 'https://information.disneyhotels.jp/happyentry/',
+    ],
+  ]);
+  if(is_wp_error($r) || wp_remote_retrieve_response_code($r) !== 200){
+    set_transient('tdrt_he', null, 5*MINUTE_IN_SECONDS);
+    return null;
+  }
+  $body = wp_remote_retrieve_body($r);
+  $today_ymd = wp_date('Ymd');
+  foreach(preg_split('/\r?\n/', $body) as $line){
+    $cols = explode(',', $line);
+    if(count($cols) >= 3 && $cols[0] === $today_ymd){
+      $out = ['tdl' => trim($cols[1]), 'tds' => trim($cols[2])];
+      set_transient('tdrt_he', $out, 6*HOUR_IN_SECONDS);
+      return $out;
+    }
+  }
+  set_transient('tdrt_he', null, 30*MINUTE_IN_SECONDS);
+  return null;
+}
+
+// Read calendar hours: prefer per-day option populated by fetcher.py (Akamai-protected → fetcher uses Playwright)
+function tdrt_fetch_calendar(){
+  $today_ymd = wp_date('Ymd');
+  $stored = get_option('tdrt_park_hours_'.$today_ymd, null);
+  if(is_array($stored)) return $stored;
+  return null;
+}
+
 function tdrt_hours($park){
+  $cal = tdrt_fetch_calendar();
+  if(is_array($cal) && isset($cal[$park])) return $cal[$park];
+  // Fallback: dwr_park_hours_json (if disney-wait-ranking populates it)
   $raw=get_option('dwr_park_hours_json','');
   if(empty($raw))return null;
   $d=is_array($raw)?$raw:json_decode($raw,true);
@@ -97,7 +138,6 @@ function tdrt_is_open($park){
   if($h && isset($h['open']) && isset($h['close'])){
     return strcmp($now,$h['open'])>=0 && strcmp($now,$h['close'])<0;
   }
-  // Fallback: typical TDR hours, with 30-min grace before "fully closed"
   return strcmp($now,'08:00')>=0 && strcmp($now,'21:30')<0;
 }
 
@@ -118,7 +158,7 @@ function tdrt_items_by_src($srcs,$lim=100){
   return $out;
 }
 
-// Parse "...｜2026/5/22" or "...｜2026/3/24 - 2026/5/22" or "...｜2020/7/1 - 未定"
+// Parse "...｜2026/5/22" / "...｜2026/3/24 - 2026/5/22" / "...｜2020/7/1 - 未定"
 function tdrt_parse_stop_period($title){
   if(preg_match('#｜(\d{4})/(\d{1,2})/(\d{1,2})\s*-\s*(\d{4})/(\d{1,2})/(\d{1,2})#u',$title,$m)){
     return ['start'=>sprintf('%04d-%02d-%02d',(int)$m[1],(int)$m[2],(int)$m[3]),'end'=>sprintf('%04d-%02d-%02d',(int)$m[4],(int)$m[5],(int)$m[6])];
@@ -195,7 +235,7 @@ function tdrt_hub($a){
   $park=strtolower($a['park'])==='tds'?'tds':'tdl';
   $pl=$park==='tdl'?'東京ディズニーランド':'東京ディズニーシー';
   $pc=$park==='tdl'?'#1d4f91':'#0a8aa6';
-  $h=tdrt_hours($park);$w=tdrt_weather();$g=tdrt_grade($park);
+  $h=tdrt_hours($park);$he=tdrt_fetch_happy_entry();$he_time=$he[$park]??null;$w=tdrt_weather();$g=tdrt_grade($park);
   $tw=tdrt_top_waits($park);
   $is_open=tdrt_is_open($park);
   $stops_raw=tdrt_items_by_src($park==='tdl'?'stop_tdl':'stop_tds',100);
@@ -226,7 +266,7 @@ function tdrt_hub($a){
 </div>
 <div class="d"><?php echo esc_html($today);?> · <?php echo esc_html($pl);?><?php if(!$is_open):?> · <span style="color:#999">🌙 営業時間外</span><?php endif;?></div>
 <div class="g">
-<div class="c"><div class="cl">開園時間</div><?php if($h&&isset($h['open'])):?><div class="cv"><?php echo esc_html($h['open']);?></div><div class="cs">~<?php echo esc_html($h['close']??'');?></div><?php else:?><div class="cv">—</div><div class="cs">公式アプリで確認</div><?php endif;?></div>
+<div class="c"><div class="cl">開園 〜 閉園</div><?php if($h&&isset($h['open'])):?><div class="cv" style="font-size:16px"><?php echo esc_html($h['open']);?>〜<?php echo esc_html($h['close']??'');?></div><?php else:?><div class="cv">—</div><?php endif;?><?php if($he_time):?><div class="cs" style="margin-top:6px">🌅 <strong>HE <?php echo esc_html($he_time);?></strong></div><?php endif;?></div>
 <div class="c"><div class="cl">天気</div><?php if($w&&isset($w['daily']['weathercode'][0])):$wc=(int)$w['daily']['weathercode'][0];$tx=round($w['daily']['temperature_2m_max'][0]);$tn=round($w['daily']['temperature_2m_min'][0]);$pp=(int)$w['daily']['precipitation_probability_max'][0];?><div class="cv"><?php echo tdrt_we($wc);?> <?php echo esc_html(tdrt_wl($wc));?></div><div class="cs"><?php echo "{$tn}°/{$tx}° 降水{$pp}%";?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">混雑グレード</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php elseif(!$is_open):?><div class="cv" style="font-size:14px;color:#999">🌙</div><div class="cs">営業時間外</div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">休止施設</div><div class="cv"><?php echo $stops_total;?>件</div><div class="cs">下のリスト参照</div></div>
@@ -240,10 +280,17 @@ function tdrt_hub($a){
 <?php elseif(!$is_open):?><p style="color:#888;text-align:center;padding:16px;background:#f8f8f8;border-radius:8px">🌙 現在パークは営業時間外です。<br>明日の開園後にリアルタイム待ち時間を表示します。</p>
 <?php else:?><p style="color:#aaa;text-align:center">データ取得中…</p><?php endif;?>
 <h3>🚫 今日の休止施設 (<?php echo $stops_total;?>件)</h3>
-<?php $cats=['attraction'=>['🎢','アトラクション'],'show'=>['🎭','ショー'],'parade'=>['🎉','パレード']];
-foreach($cats as $key=>$lbl): if(empty($stops_today[$key]))continue;?>
-<div style="margin-bottom:14px"><div style="font-size:13px;font-weight:600;color:#666;margin-bottom:4px"><?php echo $lbl[0].' '.$lbl[1];?> (<?php echo count($stops_today[$key]);?>)</div>
-<ul class="l"><?php foreach($stops_today[$key] as $s):?><li><div class="n"><?php echo esc_html($s['title']??'');?></div></li><?php endforeach;?></ul></div>
+<?php
+// TDL は ショー＋パレードを「ショー・パレード」として合体表示。TDS は ショーのみ。
+if($park==='tdl'){
+  $sp_merged = array_merge($stops_today['show'], $stops_today['parade']);
+  $cats = ['attraction'=>['🎢','アトラクション',$stops_today['attraction']], 'show_parade'=>['🎭','ショー・パレード',$sp_merged]];
+} else {
+  $cats = ['attraction'=>['🎢','アトラクション',$stops_today['attraction']], 'show'=>['🎭','ショー',$stops_today['show']]];
+}
+foreach($cats as $key=>$lbl): if(empty($lbl[2]))continue;?>
+<div style="margin-bottom:14px"><div style="font-size:13px;font-weight:600;color:#666;margin-bottom:4px"><?php echo $lbl[0].' '.$lbl[1];?> (<?php echo count($lbl[2]);?>)</div>
+<ul class="l"><?php foreach($lbl[2] as $s):?><li><div class="n"><?php echo esc_html($s['title']??'');?></div></li><?php endforeach;?></ul></div>
 <?php endforeach; if($stops_total===0):?><p style="color:#aaa;text-align:center">今日休止中の施設はありません</p><?php endif;?>
 <h3>📰 新着ニュース</h3>
 <?php if($news):?><ul class="l"><?php foreach($news as $n):?>
@@ -294,3 +341,48 @@ function tdrt_heatmap($a){
 <?php return ob_get_clean();
 }
 add_shortcode('tdr_today_heatmap','tdrt_heatmap');
+
+// REST: /tdr-today/v1/park-hours — accepts {tdl:{open,close},tds:{open,close},date:Ymd}
+// Used by fetcher.py to populate today's official park hours (since calendar.html is Akamai-protected).
+add_action('rest_api_init', function(){
+  register_rest_route('tdr-today/v1', '/park-hours', [
+    'methods' => 'POST',
+    'permission_callback' => function($req){
+      $token = (string) $req->get_header('x-tdr-token');
+      $expected = (string) get_option('tdr_mon_ingest_token', '');
+      return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+    },
+    'callback' => function($req){
+      $body = $req->get_json_params();
+      if(!is_array($body)) return new WP_Error('bad_json', 'expected JSON', ['status'=>400]);
+      $date = isset($body['date']) ? preg_replace('/[^0-9]/', '', (string)$body['date']) : wp_date('Ymd');
+      if(strlen($date) !== 8) return new WP_Error('bad_date', 'date must be Ymd', ['status'=>400]);
+      $out = [];
+      foreach(['tdl','tds'] as $park){
+        if(isset($body[$park]['open']) && isset($body[$park]['close'])){
+          $out[$park] = [
+            'open' => (string) $body[$park]['open'],
+            'close' => (string) $body[$park]['close'],
+          ];
+        }
+      }
+      if(empty($out)) return new WP_Error('empty', 'no park hours provided', ['status'=>400]);
+      // Direct SQL upsert: update_option silently fails on this host (object cache quirk)
+      $opt_key = 'tdrt_park_hours_'.$date;
+      $serialized = serialize($out);
+      global $wpdb;
+      $existing = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $opt_key));
+      if($existing){
+        $wpdb->update($wpdb->options, ['option_value'=>$serialized,'autoload'=>'no'], ['option_name'=>$opt_key], ['%s','%s'], ['%s']);
+      } else {
+        $wpdb->insert($wpdb->options, ['option_name'=>$opt_key,'option_value'=>$serialized,'autoload'=>'no'], ['%s','%s','%s']);
+      }
+      wp_cache_delete($opt_key, 'options');
+      // Auto-clean: delete park hours options older than 7 days. Prefix "tdrt_park_hours_" is 16 chars → YMD starts at MySQL position 17.
+      $cutoff = wp_date('Ymd', time() - 7*DAY_IN_SECONDS);
+      $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'tdrt_park_hours_%' AND SUBSTRING(option_name, 17, 8) < %s", $cutoff));
+      delete_transient('tdrt_cal');
+      return ['ok' => true, 'date' => $date, 'stored' => $out];
+    },
+  ]);
+});

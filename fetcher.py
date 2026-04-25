@@ -51,6 +51,10 @@ SOURCES = {
 # PRTIMES uses RDF feed instead of SPA scraping (much more reliable).
 PRTIMES_RDF = "https://prtimes.jp/companyrdf.php?company_id=119340"
 
+# Official park calendar (Akamai-protected → Playwright required).
+PARK_CALENDAR_URL = "https://www.tokyodisneyresort.jp/tdr/calendar.html"
+PARK_HOURS_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/park-hours" if WP_BASE else ""
+
 
 def stable_id(source: str, url: str, title: str = "") -> str:
     return hashlib.sha1(f"{source}|{url}|{title}".encode()).hexdigest()[:16]
@@ -248,6 +252,48 @@ PARSERS: dict[str, Callable[[str, str], list[dict]]] = {
 }
 
 
+def parse_park_calendar(html: str) -> dict[str, dict[str, str]]:
+    """Parse /tdr/calendar.html for today's TDL/TDS open/close hours.
+
+    Returns: {"tdl": {"open": "9:00", "close": "21:00"}, "tds": {...}}
+    """
+    today_ymd = time.strftime("%Y%m%d", time.localtime())
+    result: dict[str, dict[str, str]] = {}
+    import re as _re
+    for park in ("tdl", "tds"):
+        pat = (
+            r'<a href="/' + park + r'/daily/calendar/' + today_ymd + r'/"[^>]*>'
+            r'\s*<p class="openTime">\s*'
+            r'(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})'
+        )
+        m = _re.search(pat, html)
+        if m:
+            result[park] = {
+                "open":  f"{int(m.group(1))}:{m.group(2)}",
+                "close": f"{int(m.group(3))}:{m.group(4)}",
+            }
+    return result
+
+
+def ingest_park_hours(hours: dict[str, dict[str, str]]) -> dict[str, Any]:
+    if not hours:
+        return {"endpoint": "park-hours", "skipped": "no hours parsed"}
+    if DRY_RUN:
+        return {"endpoint": "park-hours", "dry_run": True, "hours": hours}
+    payload = {**hours, "date": time.strftime("%Y%m%d", time.localtime())}
+    r = requests.post(
+        PARK_HOURS_INGEST,
+        headers={"X-TDR-Token": TOKEN, "Content-Type": "application/json"},
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        timeout=15,
+    )
+    try:
+        body = r.json()
+    except Exception:
+        body = {"raw": r.text[:300]}
+    return {"endpoint": "park-hours", "status": r.status_code, **body}
+
+
 def ingest(source: str, items: list[dict]) -> dict[str, Any]:
     if not items:
         return {"source": source, "received": 0, "new": 0, "skipped": True}
@@ -324,6 +370,19 @@ def main() -> int:
             print(f"[parse] {key} items={len(unique)}", file=sys.stderr)
             res = ingest(key, unique)
             summary[key] = res
+
+        # Park calendar (today's TDL/TDS hours)
+        try:
+            html_cal = render_with_retry(page, PARK_CALENDAR_URL, "table.calendarTable")
+        except Exception as e:
+            summary["park_hours"] = {"error": f"render: {e}"}
+        else:
+            try:
+                hours = parse_park_calendar(html_cal)
+                print(f"[parse] park_hours = {hours}", file=sys.stderr)
+                summary["park_hours"] = ingest_park_hours(hours)
+            except Exception as e:
+                summary["park_hours"] = {"error": f"parse: {e}"}
 
         browser.close()
 
