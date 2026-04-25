@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.0.7
+Version: 1.0.8
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,7 +34,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.0.7'){tdrt_install();update_option('tdrt_v','1.0.7',false);}
+  if(get_option('tdrt_v','0')!=='1.0.8'){tdrt_install();update_option('tdrt_v','1.0.8',false);}
 });
 
 add_filter('cron_schedules',function($s){
@@ -241,7 +241,6 @@ function tdrt_hub($a){
   $stops_raw=tdrt_items_by_src($park==='tdl'?'stop_tdl':'stop_tds',100);
   $stops_today=tdrt_filter_stopped_today($stops_raw);
   $stops_total=count($stops_today['attraction'])+count($stops_today['show'])+count($stops_today['parade']);
-  $news=tdrt_items_by_src(['prtimes','update','urgent','olc_tdr'],5);
   $today=wp_date('Y年n月j日 (D)');
   ob_start();?>
 <style>.tdt{font-family:-apple-system,sans-serif;max-width:100%}
@@ -266,9 +265,9 @@ function tdrt_hub($a){
 </div>
 <div class="d"><?php echo esc_html($today);?> · <?php echo esc_html($pl);?><?php if(!$is_open):?> · <span style="color:#999">🌙 営業時間外</span><?php endif;?></div>
 <div class="g">
-<div class="c"><div class="cl">開園 〜 閉園</div><?php if($h&&isset($h['open'])):?><div class="cv" style="font-size:16px"><?php echo esc_html($h['open']);?>〜<?php echo esc_html($h['close']??'');?></div><?php else:?><div class="cv">—</div><?php endif;?><?php if($he_time):?><div class="cs" style="margin-top:6px">🌅 <strong>HE <?php echo esc_html($he_time);?></strong></div><?php endif;?></div>
+<div class="c"><div class="cl">運営時間</div><?php if($h&&isset($h['open'])):?><div class="cv" style="font-size:16px"><?php echo esc_html($h['open']);?>〜<?php echo esc_html($h['close']??'');?></div><?php else:?><div class="cv">—</div><?php endif;?><?php if($he_time):?><div class="cs" style="margin-top:6px">🌅 <strong>HE <?php echo esc_html($he_time);?></strong></div><?php endif;?></div>
 <div class="c"><div class="cl">天気</div><?php if($w&&isset($w['daily']['weathercode'][0])):$wc=(int)$w['daily']['weathercode'][0];$tx=round($w['daily']['temperature_2m_max'][0]);$tn=round($w['daily']['temperature_2m_min'][0]);$pp=(int)$w['daily']['precipitation_probability_max'][0];?><div class="cv"><?php echo tdrt_we($wc);?> <?php echo esc_html(tdrt_wl($wc));?></div><div class="cs"><?php echo "{$tn}°/{$tx}° 降水{$pp}%";?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
-<div class="c"><div class="cl">混雑グレード</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php elseif(!$is_open):?><div class="cv" style="font-size:14px;color:#999">🌙</div><div class="cs">営業時間外</div><?php else:?><div class="cv">—</div><?php endif;?></div>
+<div class="c"><div class="cl">混雑度</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php elseif(!$is_open):?><div class="cv" style="font-size:14px;color:#999">🌙</div><div class="cs">営業時間外</div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">休止施設</div><div class="cv"><?php echo $stops_total;?>件</div><div class="cs">下のリスト参照</div></div>
 </div>
 <h3>🔥 待ち時間 TOP 10</h3>
@@ -292,12 +291,6 @@ foreach($cats as $key=>$lbl): if(empty($lbl[2]))continue;?>
 <div style="margin-bottom:14px"><div style="font-size:13px;font-weight:600;color:#666;margin-bottom:4px"><?php echo $lbl[0].' '.$lbl[1];?> (<?php echo count($lbl[2]);?>)</div>
 <ul class="l"><?php foreach($lbl[2] as $s):?><li><div class="n"><?php echo esc_html($s['title']??'');?></div></li><?php endforeach;?></ul></div>
 <?php endforeach; if($stops_total===0):?><p style="color:#aaa;text-align:center">今日休止中の施設はありません</p><?php endif;?>
-<h3>📰 新着ニュース</h3>
-<?php if($news):?><ul class="l"><?php foreach($news as $n):?>
-<li><div style="flex:1"><div style="font-weight:600;font-size:13px;line-height:1.4"><?php echo esc_html($n['title']??'');?></div>
-<div style="font-size:11px;color:#888;margin-top:3px"><span class="src"><?php echo esc_html($n['source']??'');?></span>
-<a href="<?php echo home_url('/?tdr_share='.rawurlencode($n['_id']));?>" target="_blank">𝕏 共有</a><?php if(!empty($n['url'])):?> · <a href="<?php echo esc_url($n['url']);?>" target="_blank">元記事</a><?php endif;?></div></div></li>
-<?php endforeach;?></ul><?php else:?><p style="color:#aaa;text-align:center">なし</p><?php endif;?>
 <div class="cta">
 <a class="cp" href="<?php echo home_url('/calendar/');?>">📅 混雑予想</a>
 <a href="<?php echo home_url('/'.$park.'-wait-ranking/');?>">⏱ 待ち時間</a>
