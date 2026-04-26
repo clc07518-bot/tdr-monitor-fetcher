@@ -1,24 +1,36 @@
 # セッション引き継ぎ — TDR Monitor + ディズニー研究所ブログ
 
 **最終更新**: 2026-04-26
-**最後のコミット**: v1.3.2（attraction name map 拡充）
-**プラグインバージョン**: 1.3.2（ローカル / GitHub）／ live WP は未アップロード（ユーザー作業待ち）
+**最後のコミット**: v1.3.3（過去データ集計ショートコード2件追加）
+**プラグインバージョン**: 1.3.3（ローカル / GitHub）／ live WP は v1.2.4 より前で固定（**緊急アップロード必要**）
 
 ---
 
 ## 🚨 ユーザーが今すぐやること（最優先）
 
+> **2026-04-26 23時時点で診断済み**：live の `/wp-json/tdr-today/v1/snapshot` が **404** = live プラグインは v1.2.4 より前。
+> ユーザーから「ヒートマップ・TOP10 が固定値で更新されない」報告。原因は **DWR擬似cron が死んでいて代替経路（v1.3.1で投入）も live に届いていない**こと。
+> **唯一の解は zip アップロード**。私(Claude)からは WP 管理画面に触れないため、ユーザー手作業必須。
+
 1. **WP管理画面 → プラグイン → 新規追加 → プラグインのアップロード** で
-   `/Users/Yusuke_1/Desktop/tdr-monitor-fetcher/wp-plugin/tdr-today.zip` を選択
-   → 既存の `TDR Today` を上書き有効化（v1.2.x → v1.3.2）
+   `/Users/Yusuke_1/Desktop/tdr-monitor-fetcher/wp-plugin/tdr-today.zip` を選択（最新 18,630 bytes / v1.3.3）
+   → 既存の `TDR Today` を上書き有効化（v1.2.x → v1.3.3）
 
    このアップロードがないと：
    - 新しい REST エンドポイント `/realtime` `/snapshot` `/greetings` が叩けない
    - `wp_tdr_pass_events` テーブルが作成されない
    - DPA タイムライン `[tdr_pass_today]` ショートコードが使えない
    - 待ち時間データ源切替（`tdrt_waits_*`）が機能せず**ヒートマップが引き続きフリーズ**
+   - GHA が `/realtime` `/greetings` `/snapshot` を呼んでも 404 で silently fail し続ける
 
-2. （任意）`today-tdl` / `today-tds` 固定ページに以下を追記：
+2. アップロード直後の動作確認：
+   ```bash
+   curl -X POST "https://yasushi-duffy.com/wp-json/tdr-today/v1/snapshot" \
+     -H "Content-Type: application/json" -d '{}'
+   # → HTTP 401 (token要求) なら成功。404 ならまだ反映前。
+   ```
+
+3. （任意）`today-tdl` / `today-tds` 固定ページに以下を追記：
    ```
    <h2>キャラクターグリーティング待ち時間推移</h2>
    [tdr_today_heatmap park="tdl" type="greet"]
@@ -26,6 +38,16 @@
    <h2>本日のDPA / プライオリティパス発券状況</h2>
    [tdr_pass_today park="tdl"]
    ```
+
+4. （v1.3.3 から使える、データが溜まったら活かせる）
+   ```
+   <h2>過去同曜日の平均待ち時間</h2>
+   [tdr_history park="tdl" weekday="today" days="90"]
+
+   <h2>DPA発券終了時刻 曜日別平均</h2>
+   [tdr_pass_history park="tdl" type="dpa" days="60"]
+   ```
+   ※ 数週間データ蓄積後に有意。とくに `[tdr_pass_history]` は稼ぎ頭 `/dpa_soldout_time/` 強化に直結。
 
 ---
 
@@ -99,6 +121,16 @@ WP プラグイン側:
 - fetcher.py に `parse_realtime()` + `ingest_realtime()`
 - 軽量ポーラー `realtime_poll.py` + ワークフロー `realtime.yml`
 
+### v1.3.3
+- **過去データ集計ショートコード2件追加**（HANDOFF 残課題2件消化）
+  - `[tdr_history park="tdl" weekday="today|mon...sun|1-7" days="90" type="attr|greet"]`
+    過去N日間の同曜日における時刻別平均待ち時間ヒートマップ。`wp_tdr_wait_history` を `DAYOFWEEK + MOD(slot_key,10000)` で集計。各時刻2件以上のサンプルがあるもののみ表示。
+  - `[tdr_pass_history park="tdl" type="dpa|pp|sbp" days="60"]`
+    DPA/PP/SP 発券終了時刻の曜日別平均表。アトラクションは平日(月-金)平均終了時刻が早い順 = 完売が激しい順にソート。完売時刻に応じて6段階の色分け。**稼ぎ頭 `/dpa_soldout_time/` 強化用**。
+- 既存 index で十分（新規テーブル/インデックス不要）。
+- `tdrt_v` を 1.3.1 → 1.3.3 に更新（プラグイン上書き時に migration 走行）。
+- 注意：両ショートコードとも live がアップグレードされてからデータ蓄積開始のため、有意な表示には数週間〜1ヶ月かかる見込み。
+
 ### v1.3.2
 - **`tdrt_fix_name()` マップを公式 `/tdl/attraction.html` `/tds/attraction.html` から再構築**（HANDOFF 残課題消化）
   - エントリ数 ~50 → **111**
@@ -164,8 +196,9 @@ WP プラグイン側:
 
 ### 次回着手しやすいトピック
 - ~~TDS 公式アトラクション名の正式リスト取得~~（v1.3.2 で完了）
-- 「過去の同じ曜日の待ち時間グラフ」ショートコード
-- DPA 完売時刻の曜日別集計表示（稼ぎ頭 `/dpa_soldout_time/` の強化に直結）
+- ~~「過去の同じ曜日の待ち時間グラフ」ショートコード~~（v1.3.3 `[tdr_history]` で完了）
+- ~~DPA 完売時刻の曜日別集計表示~~（v1.3.3 `[tdr_pass_history]` で完了）
+- **次の候補**: アクセス解析（GA4/SC）の WP 取り込み / 5分粒度化 / `[tdr_history]` を Chart.js で線グラフ化
 
 ---
 

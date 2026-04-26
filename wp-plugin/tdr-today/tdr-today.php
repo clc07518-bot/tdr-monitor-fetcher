@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: TDR Today
-Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today].
-Version: 1.3.2
+Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
+Version: 1.3.3
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -51,7 +51,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.3.1'){tdrt_install();update_option('tdrt_v','1.3.1',false);}
+  if(get_option('tdrt_v','0')!=='1.3.3'){tdrt_install();update_option('tdrt_v','1.3.3',false);}
 });
 
 // DWR plugin の名称が公式表記と微妙にズレているのを補正するマップ。
@@ -732,6 +732,176 @@ foreach($sorted as $row):
 <?php return ob_get_clean();
 }
 add_shortcode('tdr_pass_today','tdrt_pass_today');
+
+// ---------- 過去同曜日の平均待ち時間（ヒートマップ） ----------
+// [tdr_history park="tdl" weekday="today|mon|tue|wed|thu|fri|sat|sun|1-7" days="90" type="attr|greet"]
+function tdrt_history($a){
+  global $wpdb;
+  $a = shortcode_atts(['park'=>'tdl','weekday'=>'today','days'=>'90','type'=>'attr'], $a, 'tdr_history');
+  $base = strtolower($a['park'])==='tds'?'tds':'tdl';
+  $park = ($a['type']==='greet') ? $base.'_g' : $base;
+  $days = max(7, min(365, intval($a['days'])));
+  // weekday: 'today' / 'mon'-'sun' / 数値1-7（1=日, MySQL DAYOFWEEK 仕様）
+  $wd_map = ['sun'=>1,'mon'=>2,'tue'=>3,'wed'=>4,'thu'=>5,'fri'=>6,'sat'=>7];
+  $wd_label_full = ['','日曜','月曜','火曜','水曜','木曜','金曜','土曜'];
+  $w_in = strtolower((string)$a['weekday']);
+  if($w_in==='today'){ $dow = ((int)wp_date('w')) + 1; }
+  else if(isset($wd_map[$w_in])){ $dow = $wd_map[$w_in]; }
+  else { $dow = max(1, min(7, intval($a['weekday']))); }
+
+  $tbl = tdrt_table();
+  $rows = $wpdb->get_results($wpdb->prepare(
+    "SELECT attr_id, attr_name, MOD(slot_key, 10000) AS hhmm,
+            ROUND(AVG(wait_min)) AS avg_w, COUNT(*) AS cnt
+     FROM {$tbl}
+     WHERE park=%s
+       AND DAYOFWEEK(recorded_at) = %d
+       AND recorded_at >= DATE_SUB(CURDATE(), INTERVAL %d DAY)
+       AND wait_min IS NOT NULL
+     GROUP BY attr_id, attr_name, MOD(slot_key, 10000)
+     HAVING cnt >= 2
+     ORDER BY MOD(slot_key, 10000) ASC",
+    $park, $dow, $days));
+  if(!$rows) return '<p style="text-align:center;color:#aaa;padding:20px">過去'.esc_html($days).'日間の'.esc_html($wd_label_full[$dow]).'のデータがまだ十分に蓄積されていません。<br><small>毎日収集中のため、数週間後に有意なグラフが表示されます。</small></p>';
+
+  $m=[];$nm=[];$sl=[];$tot=[];
+  foreach($rows as $r){
+    $hh=(int)$r->hhmm;
+    $m[$r->attr_id][$hh]=(int)$r->avg_w;
+    $nm[$r->attr_id]=tdrt_fix_name($r->attr_name);
+    $sl[$hh]=1;
+    $tot[$r->attr_id]=($tot[$r->attr_id]??0)+(int)$r->avg_w;
+  }
+  $ks=array_keys($sl);sort($ks);arsort($tot);
+  $ord=array_keys($tot);
+  $cls=function($w){if($w===null)return 'h0';if($w>=180)return 'h6';if($w>=120)return 'h5';if($w>=80)return 'h4';if($w>=50)return 'h3';if($w>=20)return 'h2';return 'h1';};
+  ob_start();?>
+<style>.thh{overflow-x:auto;margin:16px 0;-webkit-overflow-scrolling:touch}
+.thh table{border-collapse:collapse;font-size:11px;background:#fff}
+.thh th,.thh td{border:1px solid #ddd;text-align:center;padding:4px 6px;min-width:36px;white-space:nowrap}
+.thh thead th{background:#2a2a3a;color:#fff;writing-mode:vertical-rl;text-orientation:mixed;padding:8px 4px;font-weight:600;max-width:32px;height:120px;line-height:1.15}
+.thh thead th:first-child{writing-mode:initial;text-orientation:initial;max-width:none;min-width:50px;height:auto}
+.thh tbody th{background:#f5f5f5;text-align:right;padding-right:6px;font-weight:500;position:sticky;left:0}
+.thh .h0{background:#fafafa;color:#ccc}.thh .h1{background:#fff}.thh .h2{background:#e0f2ff}.thh .h3{background:#fff8b3}.thh .h4{background:#ffd699}.thh .h5{background:#ff9999}.thh .h6{background:#cc4444;color:#fff;font-weight:600}
+.thhl{font-size:11px;color:#666;margin:6px 0}.thhl span{display:inline-block;padding:2px 8px;border-radius:3px;margin-right:4px;border:1px solid #ddd}</style>
+<p style="font-size:13px;color:#444;margin:6px 0">📊 過去<?php echo esc_html($days);?>日間の<strong><?php echo esc_html($wd_label_full[$dow]);?></strong>の平均待ち時間（分）</p>
+<div class="thhl"><span class="h1">~20分</span><span class="h2">~50分</span><span class="h3">~80分</span><span class="h4">~120分</span><span class="h5">~180分</span><span class="h6">180+</span></div>
+<div class="thh"><table><thead><tr><th>時刻</th><?php foreach($ord as $aid):?><th><?php echo esc_html($nm[$aid]);?></th><?php endforeach;?></tr></thead><tbody>
+<?php foreach($ks as $hhmm):$hh=(int)floor($hhmm/100);$mm=$hhmm%100;?>
+<tr><th><?php printf('%02d:%02d',$hh,$mm);?></th>
+<?php foreach($ord as $aid):$w=$m[$aid][$hhmm]??null;$c=$cls($w);$d=$w===null?'-':$w;?>
+<td class="<?php echo $c;?>"><?php echo esc_html($d);?></td>
+<?php endforeach;?></tr>
+<?php endforeach;?>
+</tbody></table></div>
+<p style="font-size:11px;color:#888;margin-top:6px">※ 各時刻2件以上のサンプルがある時刻のみ表示。<small>過去<?php echo esc_html($days);?>日間平均</small></p>
+<?php return ob_get_clean();
+}
+add_shortcode('tdr_history','tdrt_history');
+
+// ---------- DPA/PP/SP 発券終了時刻 曜日別集計表 ----------
+// [tdr_pass_history park="tdl" type="dpa|pp|sbp" days="60"]
+function tdrt_pass_history($a){
+  global $wpdb;
+  $a = shortcode_atts(['park'=>'tdl','days'=>'60','type'=>'dpa'], $a, 'tdr_pass_history');
+  $park = strtolower($a['park'])==='tds'?'tds':'tdl';
+  $type = in_array($a['type'], ['dpa','pp','sbp'], true) ? $a['type'] : 'dpa';
+  $days = max(14, min(365, intval($a['days'])));
+  $type_label = ['dpa'=>'ディズニー・プレミアアクセス（DPA）','pp'=>'プライオリティパス（PP）','sbp'=>'スタンバイパス'];
+  $type_color = ['dpa'=>'#d63384','pp'=>'#0d6efd','sbp'=>'#198754'];
+
+  $ptbl = tdrt_pass_table();
+  $rows = $wpdb->get_results($wpdb->prepare(
+    "SELECT attr_id, attr_name, DAYOFWEEK(event_date) AS dow, event_time, event_date
+     FROM {$ptbl}
+     WHERE park=%s AND pass_type=%s AND event='end'
+       AND event_date >= DATE_SUB(CURDATE(), INTERVAL %d DAY)",
+    $park, $type, $days));
+  if(!$rows) return '<p style="text-align:center;color:#aaa;padding:20px">過去'.esc_html($days).'日間の<strong>'.esc_html($type_label[$type]).'</strong>発券データがまだ蓄積されていません。<br><small>5〜30分間隔で自動収集中。</small></p>';
+
+  // attr_id => dow(1-7) => [秒]
+  $by = []; $nm = [];
+  foreach($rows as $r){
+    $aid = $r->attr_id;
+    $nm[$aid] = tdrt_fix_name($r->attr_name);
+    $t = strtotime($r->event_time);
+    $d = strtotime($r->event_date.' 00:00:00');
+    if($t && $d){
+      $by[$aid][(int)$r->dow][] = $t - $d;
+    }
+  }
+  // 並び順: 平日(月-金)平均終了時刻が早い順 = 完売が激しい人気アトラクション順
+  $rank = [];
+  foreach($by as $aid => $w){
+    $secs=[];
+    foreach([2,3,4,5,6] as $d){ if(!empty($w[$d])) $secs = array_merge($secs, $w[$d]); }
+    $rank[$aid] = $secs ? array_sum($secs)/count($secs) : PHP_INT_MAX;
+  }
+  asort($rank);
+  $ord = array_keys($rank);
+
+  $wd_label = ['','日','月','火','水','木','金','土']; // index 1=Sun
+  $tt = function($secs){
+    if($secs === null) return '—';
+    $h = (int)floor($secs/3600); $m = (int)floor(($secs%3600)/60);
+    return sprintf('%02d:%02d', $h, $m);
+  };
+  $cls_t = function($secs){
+    if($secs === null) return 'pn';
+    $h = $secs/3600;
+    if($h <  9.5) return 'p6';
+    if($h < 10.5) return 'p5';
+    if($h < 12)   return 'p4';
+    if($h < 14)   return 'p3';
+    if($h < 17)   return 'p2';
+    return 'p1';
+  };
+
+  ob_start();?>
+<style>
+.tph{margin:16px 0}
+.tph .head{padding:8px 12px;background:linear-gradient(90deg,<?php echo $type_color[$type];?>,<?php echo $type_color[$type];?>cc);color:#fff;font-size:13px;border-radius:4px 4px 0 0}
+.tph table{width:100%;border-collapse:collapse;font-size:12px;background:#fff;table-layout:fixed}
+.tph th,.tph td{border:1px solid #e0e0e0;padding:6px 4px;text-align:center}
+.tph thead th{background:#2a2a3a;color:#fff;font-size:11px;font-weight:600}
+.tph thead th:first-child{text-align:left;padding-left:8px}
+.tph tbody th{background:#f5f5f5;text-align:left;font-weight:500;padding:6px 8px;font-size:11.5px}
+.tph .pn{background:#fafafa;color:#bbb}
+.tph .p1{background:#d6f5d6}
+.tph .p2{background:#e8f7c9}
+.tph .p3{background:#fff8b3}
+.tph .p4{background:#ffd699}
+.tph .p5{background:#ff9999}
+.tph .p6{background:#cc4444;color:#fff;font-weight:700}
+.tph .legend{font-size:11px;color:#666;margin:6px 0}
+.tph .legend span{display:inline-block;padding:2px 8px;border-radius:3px;margin:0 2px;border:1px solid #ddd;font-size:10.5px}
+.tph .wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.tph .note{font-size:11px;color:#888;margin-top:6px}
+</style>
+<div class="tph">
+<div class="head">🎫 <?php echo esc_html($type_label[$type]);?> 発券終了時刻 曜日別平均（過去<?php echo esc_html($days);?>日間）</div>
+<div class="legend">完売時刻：<span class="p6">~9:30</span><span class="p5">~10:30</span><span class="p4">~12:00</span><span class="p3">~14:00</span><span class="p2">~17:00</span><span class="p1">17時〜/残あり</span></div>
+<div class="wrap"><table>
+<thead><tr><th>アトラクション</th>
+<?php foreach([2,3,4,5,6,7,1] as $d):?><th><?php echo $wd_label[$d];?></th><?php endforeach;?>
+</tr></thead>
+<tbody>
+<?php foreach($ord as $aid):?>
+<tr><th><?php echo esc_html($nm[$aid]);?></th>
+<?php foreach([2,3,4,5,6,7,1] as $d):
+  $arr = $by[$aid][$d] ?? [];
+  $avg = (count($arr) >= 2) ? array_sum($arr)/count($arr) : null;
+  $c = $cls_t($avg);
+?><td class="<?php echo $c;?>"><?php echo esc_html($tt($avg));?></td><?php endforeach;?>
+</tr>
+<?php endforeach;?>
+</tbody>
+</table></div>
+<p class="note">※ 各曜日2件以上のサンプルがある場合のみ平均値を表示。データ蓄積に応じて精度向上。</p>
+</div>
+<?php return ob_get_clean();
+}
+add_shortcode('tdr_pass_history','tdrt_pass_history');
 
 // REST: /tdr-today/v1/realtime — accepts realtime badge state + computes pass-event transitions.
 // Body: {tdl: [{name, has_pp:bool, has_dpa:bool, has_sbp:bool, status:str}], tds: [...]}
