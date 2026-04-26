@@ -1,8 +1,8 @@
 # セッション引き継ぎ — TDR Monitor + ディズニー研究所ブログ
 
-**最終更新**: 2026-04-26
-**最後のコミット**: v1.3.3（過去データ集計ショートコード2件追加）
-**プラグインバージョン**: 1.3.3（ローカル / GitHub）／ live WP は v1.2.4 より前で固定（**緊急アップロード必要**）
+**最終更新**: 2026-04-27
+**最後のコミット**: v1.3.6（WP-backed X state + backfill mode + greetings JSON 修正）
+**プラグインバージョン**: 1.3.6（ローカル / GitHub）／ live WP は v1.3.3（**v1.3.6 への再アップロード必要**）
 
 ---
 
@@ -120,6 +120,25 @@ WP プラグイン側:
   - 新ショートコード `[tdr_pass_today park="tdl"]`
 - fetcher.py に `parse_realtime()` + `ingest_realtime()`
 - 軽量ポーラー `realtime_poll.py` + ワークフロー `realtime.yml`
+
+### v1.3.4 / v1.3.5 / v1.3.6（緊急対応：HTML→JSON 移行と X auto-post）
+
+**重大事象**：2026-04-27 ユーザー報告「ヒートマップ・TOP10 が固定値で更新されない」「X 全然更新されてない」「キャラグリ・ログ消えてる」。
+
+**真因（HTML→JSON 移行）**：TDR公式サイトが `/<park>/realtime/` および `/<park>/realtime/greeting.html` から待ち時間データを HTML 上から削除し、`/_/realtime/<park>_attraction.json` / `<park>_greeting.json` (Akamai 越し XHR) のみで配信するよう変更していた。`fetcher.py` の HTML scrape parser は何ヶ月も silently 0件返しを続けていた。結果：
+- `tdrt_waits_<park>` 空 → 死んだ DWR cache へフォールバック → ヒートマップ凍結
+- `tdrt_greet_<park>` 1件以下 → キャラグリ表示空
+- `realtime_poll.py` も同根
+
+**v1.3.4**（commit `d7d66dc`）: アトラクション JSON API へ切替。`fetch_realtime_json()` 追加、`parse_realtime()` を JSON consumer に書き換え。`StandbyTime`/`OperatingStatusCD`/`DPAStatusCD`/`PPStatusCD`/`Fsflg` をフィールド直で取得。`realtime_poll.py` も連動。
+
+**v1.3.5**（commit `4ed060a`）: グリーティング JSON API へ切替（同パターン）。X 投稿の state pre-run log を強化（cache が効いてるか診断可能に）。
+
+**v1.3.6**（commit `27e55cb`）: WP-backed X state + backfill モード。
+- 真因仮説：actions/cache が runs 跨ぎで `.x_state.json` を保てない → 毎回 first-run seed → 0 投稿
+- 対策：新エンドポイント `GET/POST /tdr-today/v1/xstate` を追加。WP option `tdrt_x_state` に state を保存。`fetcher.x_load_state()` は WP > file > fresh の順
+- 検証手段：`workflow_dispatch` に `backfill: bool` input 追加。ON で seed バイパス＋posted_ids/by_date リセット＋全件 post_to_x。daily_limit 15 で flood は capped
+- 動作仕様確認：X auto-post hours は `[7, 23)` JST。深夜は posts 0 が正常
 
 ### v1.3.3
 - **過去データ集計ショートコード2件追加**（HANDOFF 残課題2件消化）
