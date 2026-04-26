@@ -416,7 +416,10 @@ def post_to_x(item: dict) -> dict:
     if src not in X_ALLOWED_SOURCES:
         return {"posted": False, "reason": f"source_filtered:{src}"}
     now = time.localtime()
-    if not (X_HOUR_START <= now.tm_hour < X_HOUR_END):
+    # X_BACKFILL=1 (workflow_dispatch verification mode) は hours check も bypass。
+    # 通常 cron では off-hours 投稿しない設計を維持。
+    backfill = os.environ.get("X_BACKFILL", "0").lower() in ("1", "true", "yes")
+    if not backfill and not (X_HOUR_START <= now.tm_hour < X_HOUR_END):
         return {"posted": False, "reason": f"out_of_hours:{now.tm_hour}"}
 
     state = x_load_state()
