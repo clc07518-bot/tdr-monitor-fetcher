@@ -1,0 +1,57 @@
+name: TDR Realtime Poll
+
+# DPA / プライオリティパス / スタンバイパスのバッジ消失タイミングを5分粒度で記録するための
+# 軽量ワークフロー。realtime ページだけ Playwright で叩いて /tdr-today/v1/realtime へ POST。
+#
+# 実行時間制約：
+#   GHA 無料枠 2,000min/月 のうち、現状 monitor.yml(*/30, ~1440min) + snapshot.yml(15,45, ~960min)
+#   で約 2,400min/月。これを 5分間隔で 24時間回すと +8,640min/月 になり大幅オーバー。
+#   そこで「パーク営業時間内 (JST 7:30-22:30 ≒ UTC 22:30-13:30)」かつ「5分間隔」で限定実行。
+#   15時間 × 12回/h = 180 runs/day × 1分(billing) = 5,400min/月  → これでも単独で予算オーバー。
+#
+# したがってデフォルトは「8-21時JST = 23-12 UTC」の 13時間 × 6回/h(10分間隔) = 78 runs/day
+#   ≒ 2,340min/月 で単独運用可能なレベルに抑える。
+#   5分間隔が欲しい場合は cron を */5 に変更し、public repo 化 or GHA 課金を許容。
+on:
+  schedule:
+    # JST 8:00-21:00 = UTC 23:00-12:00 (跨日) / 10分毎
+    - cron: '0,10,20,30,40,50 23,0,1,2,3,4,5,6,7,8,9,10,11 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: tdr-realtime
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install minimal deps
+        run: pip install requests beautifulsoup4 lxml playwright playwright-stealth
+
+      - name: Setup Google Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Install Playwright runtime deps
+        run: python -m playwright install-deps chromium
+
+      - name: Install Playwright Chromium (fallback)
+        run: python -m playwright install chromium
+
+      - name: Poll realtime pages
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
+          PW_CHANNEL: chrome
+          REALTIME_ONLY: '1'
+        run: python realtime_poll.py

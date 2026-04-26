@@ -93,6 +93,13 @@ GREETINGS_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/greetings" if WP_BASE else "
 # Snapshot trigger (15-min reliable cron without depending on WP-Cron).
 SNAPSHOT_TRIGGER = f"{WP_BASE}/wp-json/tdr-today/v1/snapshot" if WP_BASE else ""
 
+# Realtime page (DPA / PP / SBP badge tracking).
+REALTIME_URLS = {
+    "tdl": "https://www.tokyodisneyresort.jp/tdl/realtime/",
+    "tds": "https://www.tokyodisneyresort.jp/tds/realtime/",
+}
+REALTIME_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/realtime" if WP_BASE else ""
+
 
 def stable_id(source: str, url: str, title: str = "") -> str:
     return hashlib.sha1(f"{source}|{url}|{title}".encode()).hexdigest()[:16]
@@ -535,6 +542,75 @@ def ingest_greetings(per_park: dict[str, list[dict]]) -> dict[str, Any]:
     return {"endpoint": "greetings", "status": r.status_code, **body}
 
 
+def parse_realtime(html: str) -> list[dict]:
+    """Parse /{tdl|tds}/realtime/ for badge presence per attraction.
+
+    Looks for badges/text within each attraction <li>:
+      - "プライオリティパス"        → has_pp
+      - "ディズニー・プレミアアクセス" or "DPA" → has_dpa
+      - "スタンバイパス"            → has_sbp
+    Also captures wait_min and status (operating/closed).
+    """
+    import re as _re
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[dict] = []
+    seen: set[str] = set()
+    candidates = soup.select(".linkList33 li, .realtimeList li, ul li[data-id], section li")
+    for li in candidates:
+        name_el = li.select_one(".heading3, .heading4, h3, h4, .title")
+        if not name_el:
+            continue
+        name = name_el.get_text(" ", strip=True)
+        if not name or name in seen:
+            continue
+        full_text = li.get_text(" ", strip=True)
+        # Skip if this li is clearly not an attraction entry (no name+wait pattern)
+        has_pp  = "プライオリティパス" in full_text
+        has_dpa = ("プレミアアクセス" in full_text) or ("DPA" in full_text)
+        has_sbp = "スタンバイパス" in full_text
+        # Wait time
+        wait_min = None
+        m = _re.search(r"(\d{1,3})\s*分", full_text)
+        if m:
+            v = int(m.group(1))
+            if v <= 480:
+                wait_min = v
+        # Status
+        status = "operating"
+        if any(k in full_text for k in ("中止", "休止", "本日終了", "運営終了", "受付終了")):
+            status = "closed"
+        out.append({
+            "name": name,
+            "has_pp": has_pp,
+            "has_dpa": has_dpa,
+            "has_sbp": has_sbp,
+            "wait_min": wait_min,
+            "status": status,
+        })
+        seen.add(name)
+    return out
+
+
+def ingest_realtime(per_park: dict[str, list[dict]]) -> dict[str, Any]:
+    if not per_park or not any(per_park.values()):
+        return {"endpoint": "realtime", "skipped": "no realtime parsed"}
+    if DRY_RUN:
+        return {"endpoint": "realtime", "dry_run": True,
+                "counts": {k: len(v) for k, v in per_park.items()}}
+    payload = dict(per_park)
+    r = requests.post(
+        REALTIME_INGEST,
+        headers={"X-TDR-Token": TOKEN, "Content-Type": "application/json"},
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        timeout=20,
+    )
+    try:
+        body = r.json()
+    except Exception:
+        body = {"raw": r.text[:300]}
+    return {"endpoint": "realtime", "status": r.status_code, **body}
+
+
 def trigger_snapshot() -> dict[str, Any]:
     """確実な15分間隔のためにスナップショットを明示的に呼ぶ。"""
     if not SNAPSHOT_TRIGGER or DRY_RUN:
@@ -720,6 +796,25 @@ def main() -> int:
             summary["greetings"] = ingest_greetings(greetings)
         except Exception as e:
             summary["greetings"] = {"error": f"ingest: {e}"}
+
+        # Realtime page: DPA / PP / SBP badges + wait times → state-transition logging on WP side
+        realtime: dict[str, list[dict]] = {}
+        for park, url in REALTIME_URLS.items():
+            try:
+                html_rt = render_with_retry(page, url, "main, .linkList33, body")
+                realtime[park] = parse_realtime(html_rt)
+                pp = sum(1 for r in realtime[park] if r["has_pp"])
+                dpa = sum(1 for r in realtime[park] if r["has_dpa"])
+                sbp = sum(1 for r in realtime[park] if r["has_sbp"])
+                print(f"[parse] realtime {park}: {len(realtime[park])} items "
+                      f"(pp={pp} dpa={dpa} sbp={sbp})", file=sys.stderr)
+            except Exception as e:
+                print(f"[warn] realtime {park}: {e}", file=sys.stderr)
+                realtime[park] = []
+        try:
+            summary["realtime"] = ingest_realtime(realtime)
+        except Exception as e:
+            summary["realtime"] = {"error": f"ingest: {e}"}
 
         browser.close()
 

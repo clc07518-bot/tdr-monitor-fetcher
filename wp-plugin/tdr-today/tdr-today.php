@@ -1,13 +1,14 @@
 <?php
 /*
 Plugin Name: TDR Today
-Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.2.4
+Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today].
+Version: 1.3.0
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
 
 function tdrt_table(){global $wpdb;return $wpdb->prefix.'tdr_wait_history';}
+function tdrt_pass_table(){global $wpdb;return $wpdb->prefix.'tdr_pass_events';}
 
 function tdrt_install(){
   global $wpdb;$tbl=tdrt_table();$cs=$wpdb->get_charset_collate();
@@ -31,10 +32,26 @@ function tdrt_install(){
     $wpdb->query("ALTER TABLE {$tbl} MODIFY COLUMN slot_key BIGINT NOT NULL");
     $wpdb->query("TRUNCATE TABLE {$tbl}");
   }
+  // DPA / プライオリティパス / スタンバイパス の発券開始・終了イベントログ
+  $ptbl=tdrt_pass_table();
+  $sql2="CREATE TABLE IF NOT EXISTS {$ptbl} (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    park VARCHAR(8) NOT NULL,
+    attr_id VARCHAR(64) NOT NULL,
+    attr_name VARCHAR(160) NOT NULL,
+    pass_type VARCHAR(8) NOT NULL,
+    event VARCHAR(16) NOT NULL,
+    event_date DATE NOT NULL,
+    event_time DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE KEY uniq_event (park, attr_id, pass_type, event, event_date),
+    KEY idx_park_date (park, event_date)
+  ) {$cs};";
+  dbDelta($sql2);
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.2.4'){tdrt_install();update_option('tdrt_v','1.2.4',false);}
+  if(get_option('tdrt_v','0')!=='1.3.0'){tdrt_install();update_option('tdrt_v','1.3.0',false);}
 });
 
 // DWR plugin の名称が公式表記と微妙にズレているのを補正するマップ。
@@ -543,6 +560,199 @@ function tdrt_heatmap($a){
 <?php return ob_get_clean();
 }
 add_shortcode('tdr_today_heatmap','tdrt_heatmap');
+
+// ---------- DPA / プライオリティパス 発券タイムライン ----------
+function tdrt_pass_today($a){
+  global $wpdb;
+  $a = shortcode_atts(['park'=>'tdl'], $a, 'tdr_pass_today');
+  $park = strtolower($a['park'])==='tds'?'tds':'tdl';
+  $pl = $park==='tdl'?'東京ディズニーランド':'東京ディズニーシー';
+  $pc = $park==='tdl'?'#1d4f91':'#0a8aa6';
+  $today = wp_date('Y-m-d');
+  $ptbl = tdrt_pass_table();
+  // 今日のイベントを取得
+  $rows = $wpdb->get_results($wpdb->prepare(
+    "SELECT attr_id,attr_name,pass_type,event,event_time FROM {$ptbl} "
+    ."WHERE park=%s AND event_date=%s ORDER BY event_time ASC",
+    $park, $today));
+  // attr_id -> [type -> [start_time, end_time]]
+  $by_attr = [];
+  foreach($rows as $r){
+    $aid = $r->attr_id;
+    $by_attr[$aid]['name'] = tdrt_fix_name($r->attr_name);
+    $by_attr[$aid][$r->pass_type][$r->event] = $r->event_time;
+  }
+  // 現在の状態
+  $current = get_option('tdrt_realtime_'.$park, []);
+  if(!is_array($current)) $current = [];
+  $cur_idx = [];
+  foreach($current as $c){ if(isset($c['name'])) $cur_idx[$c['name']] = $c; }
+
+  $type_label = ['dpa'=>'DPA', 'pp'=>'PP', 'sbp'=>'SP'];
+  $type_color = ['dpa'=>'#d63384', 'pp'=>'#0d6efd', 'sbp'=>'#198754'];
+
+  ob_start();?>
+<style>
+.tpt{font-family:-apple-system,sans-serif}
+.tpt h3{font-size:16px;margin:18px 0 10px;padding-left:10px;border-left:4px solid <?php echo $pc;?>}
+.tpt table{width:100%;border-collapse:collapse;font-size:12px;background:#fff}
+.tpt th,.tpt td{border:1px solid #e0e0e0;padding:6px 8px;text-align:left;vertical-align:middle}
+.tpt thead th{background:#2a2a3a;color:#fff;font-weight:600;font-size:11px;text-align:center}
+.tpt .pass{display:inline-block;padding:2px 6px;border-radius:3px;color:#fff;font-size:10px;font-weight:700;margin-right:4px}
+.tpt .ended{opacity:0.5;text-decoration:line-through}
+.tpt .live{background:#fff8b3}
+.tpt .end-time{font-weight:700;color:#d0334d}
+.tpt .start-time{color:#666;font-size:11px}
+.tpt .none{color:#aaa;text-align:center;padding:20px}
+.tpt .legend{font-size:11px;color:#666;margin:6px 0 12px}
+.tpt .legend .pass{margin-right:4px}
+</style>
+<div class="tpt">
+<h3>🎫 <?php echo esc_html($pl);?> パス発券状況</h3>
+<div class="legend">
+  <span class="pass" style="background:#d63384">DPA</span>ディズニー・プレミアアクセス（有料）
+  <span class="pass" style="background:#0d6efd">PP</span>プライオリティパス（無料）
+  <span class="pass" style="background:#198754">SP</span>スタンバイパス
+</div>
+<?php if(empty($by_attr)): ?>
+<p class="none">本日のパス発券データはまだありません。<br><small>5〜30分間隔で自動収集中。</small></p>
+<?php else: ?>
+<table>
+<thead><tr><th>アトラクション</th><th>種別</th><th>発券開始</th><th>発券終了</th><th>状況</th></tr></thead>
+<tbody>
+<?php
+// ソート: 発券中(まだ終わってない)を上に、終わった順を時間降順で
+$sorted = [];
+foreach($by_attr as $aid=>$data){
+  $name = $data['name'];
+  foreach(['dpa','pp','sbp'] as $tp){
+    if(!isset($data[$tp])) continue;
+    $start = $data[$tp]['start'] ?? null;
+    $end   = $data[$tp]['end']   ?? null;
+    $cur   = $cur_idx[$name]['has_'.$tp] ?? false;
+    $sorted[] = ['aid'=>$aid,'name'=>$name,'type'=>$tp,'start'=>$start,'end'=>$end,'live'=>$cur];
+  }
+}
+usort($sorted, function($a,$b){
+  // 発券中(live)を上、終了済(end)はend時刻降順、startだけは時刻降順
+  if($a['live'] !== $b['live']) return $b['live']?1:-1;
+  $at = $a['end'] ?? $a['start'] ?? '';
+  $bt = $b['end'] ?? $b['start'] ?? '';
+  return strcmp($bt, $at);
+});
+foreach($sorted as $row):
+  $tp = $row['type'];
+  $start_t = $row['start'] ? wp_date('H:i', strtotime($row['start'])) : '—';
+  $end_t   = $row['end']   ? wp_date('H:i', strtotime($row['end']))   : ($row['live']?'—':'—');
+  $live    = $row['live'];
+?>
+<tr class="<?php echo $live?'live':'ended';?>">
+<td><?php echo esc_html($row['name']);?></td>
+<td><span class="pass" style="background:<?php echo $type_color[$tp];?>"><?php echo $type_label[$tp];?></span></td>
+<td class="start-time"><?php echo esc_html($start_t);?></td>
+<td class="<?php echo (!$live && $row['end'])?'end-time':'';?>"><?php echo esc_html($end_t);?></td>
+<td><?php echo $live?'🟢 発券中':'🔴 終了';?></td>
+</tr>
+<?php endforeach;?>
+</tbody>
+</table>
+<?php endif;?>
+<?php $last = (int) get_option('tdrt_realtime_last', 0); if($last):?>
+<p style="font-size:11px;color:#888;margin-top:6px;text-align:right">最終更新: <?php echo esc_html(wp_date('H:i', $last));?></p>
+<?php endif;?>
+</div>
+<?php return ob_get_clean();
+}
+add_shortcode('tdr_pass_today','tdrt_pass_today');
+
+// REST: /tdr-today/v1/realtime — accepts realtime badge state + computes pass-event transitions.
+// Body: {tdl: [{name, has_pp:bool, has_dpa:bool, has_sbp:bool, status:str}], tds: [...]}
+// 前回スナップショット (option `tdrt_realtime_<park>`) と比較し、バッジが新たに付いた/外れた瞬間を
+// `wp_tdr_pass_events` テーブルへ INSERT IGNORE。同じ日に同じ event は重複しない（UNIQUE KEY）。
+add_action('rest_api_init', function(){
+  register_rest_route('tdr-today/v1', '/realtime', [
+    'methods' => 'POST',
+    'permission_callback' => function($req){
+      $token = (string) $req->get_header('x-tdr-token');
+      $expected = (string) get_option('tdr_mon_ingest_token', '');
+      return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+    },
+    'callback' => function($req){
+      global $wpdb;
+      $body = $req->get_json_params();
+      if(!is_array($body)) return new WP_Error('bad_json', 'expected JSON', ['status'=>400]);
+      $now_dt = current_time('mysql');
+      $today = wp_date('Y-m-d');
+      $ptbl = tdrt_pass_table();
+      $events_logged = 0;
+      $stored = [];
+      foreach(['tdl','tds'] as $park){
+        if(!isset($body[$park]) || !is_array($body[$park])) continue;
+        $rows = [];
+        foreach($body[$park] as $row){
+          if(!is_array($row) || empty($row['name'])) continue;
+          $rows[] = [
+            'name'    => (string)$row['name'],
+            'has_pp'  => !empty($row['has_pp']),
+            'has_dpa' => !empty($row['has_dpa']),
+            'has_sbp' => !empty($row['has_sbp']),
+            'status'  => isset($row['status']) ? (string)$row['status'] : 'operating',
+            'wait_min'=> (isset($row['wait_min']) && $row['wait_min']!==''&&$row['wait_min']!==null) ? (int)$row['wait_min'] : null,
+          ];
+        }
+        $opt_key = 'tdrt_realtime_'.$park;
+        $prev = get_option($opt_key, []);
+        if(!is_array($prev)) $prev = [];
+        // Index prev by name for diff
+        $prev_idx = [];
+        foreach($prev as $p){ if(isset($p['name'])) $prev_idx[$p['name']] = $p; }
+        // Diff
+        foreach($rows as $r){
+          $nm = $r['name'];
+          $aid = substr(md5($nm), 0, 16);
+          $p = $prev_idx[$nm] ?? null;
+          $pairs = [
+            'pp'  => 'has_pp',
+            'dpa' => 'has_dpa',
+            'sbp' => 'has_sbp',
+          ];
+          foreach($pairs as $type=>$flag){
+            $now_on  = (bool)$r[$flag];
+            $prev_on = $p ? (bool)($p[$flag] ?? false) : null;
+            // 初観測: prev_onがnullで now_on=true なら "start"
+            if($prev_on === null && $now_on){
+              $event = 'start';
+            } elseif($prev_on === false && $now_on === true){
+              $event = 'start';
+            } elseif($prev_on === true && $now_on === false){
+              $event = 'end';
+            } else {
+              continue;
+            }
+            $wpdb->query($wpdb->prepare(
+              "INSERT IGNORE INTO {$ptbl} (park,attr_id,attr_name,pass_type,event,event_date,event_time) "
+              ."VALUES (%s,%s,%s,%s,%s,%s,%s)",
+              $park,$aid,$nm,$type,$event,$today,$now_dt
+            ));
+            if($wpdb->rows_affected > 0) $events_logged++;
+          }
+        }
+        // Save current snapshot
+        $serialized = serialize($rows);
+        $existing = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $opt_key));
+        if($existing){
+          $wpdb->update($wpdb->options, ['option_value'=>$serialized,'autoload'=>'no'], ['option_name'=>$opt_key], ['%s','%s'], ['%s']);
+        } else {
+          $wpdb->insert($wpdb->options, ['option_name'=>$opt_key,'option_value'=>$serialized,'autoload'=>'no'], ['%s','%s','%s']);
+        }
+        wp_cache_delete($opt_key, 'options');
+        $stored[$park] = count($rows);
+      }
+      update_option('tdrt_realtime_last', time(), false);
+      return ['ok'=>true, 'stored'=>$stored, 'events_logged'=>$events_logged, 'now'=>time()];
+    },
+  ]);
+});
 
 // REST: /tdr-today/v1/snapshot — manually trigger snapshot from external cron (cron-job.org / GHA)
 // 擬似 WP-Cron に依存しない確実な15分間隔記録のため。
