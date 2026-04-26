@@ -84,10 +84,13 @@ SHOW_SCHEDULE_URLS = {
 SHOWS_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/shows" if WP_BASE else ""
 
 # Character greeting realtime wait times (per-park).
-GREETING_URLS = {
+# 公式 HTML には現在ほぼデータが無い。/_/realtime/<park>_greeting.json を XHR で取る。
+# Akamai 越え用に親 HTML を踏んでセッション確立してから fetch する。
+GREETING_PARENT = {
     "tdl": "https://www.tokyodisneyresort.jp/tdl/realtime/greeting.html",
     "tds": "https://www.tokyodisneyresort.jp/tds/realtime/greeting.html",
 }
+GREETING_URLS = GREETING_PARENT  # legacy alias
 GREETINGS_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/greetings" if WP_BASE else ""
 
 # Snapshot trigger (15-min reliable cron without depending on WP-Cron).
@@ -480,50 +483,73 @@ def parse_show_schedule(html: str) -> list[dict]:
     return out
 
 
-def parse_greetings(html: str) -> list[dict]:
-    """Parse /{tdl|tds}/realtime/greeting.html for current character greeting wait times.
+def fetch_greeting_json(page, park: str) -> dict:
+    """Fetch /_/realtime/<park>_greeting.json via Playwright session."""
+    parent = GREETING_PARENT[park]
+    page.goto(parent, wait_until="domcontentloaded", timeout=60000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(800)
+    result = page.evaluate(
+        """async (park) => {
+            const r = await fetch('/_/realtime/' + park + '_greeting.json?' + Date.now(), {credentials: 'include'});
+            const t = await r.text();
+            return {status: r.status, text: t};
+        }""",
+        park,
+    )
+    if result.get("status") != 200:
+        raise RuntimeError(f"greeting json HTTP {result.get('status')} for {park}")
+    return json.loads(result["text"])
 
-    Returns: [{"name": ..., "location": ..., "wait_min": int|None, "status": "operating"|"closed"}, ...]
 
-    Defensive: TDR official's realtime pages share a similar list structure, but classes can vary.
-    Try multiple selectors and fall back to text-pattern extraction.
+def parse_greetings(data) -> list[dict]:
+    """Normalize greeting JSON.
+
+    Input: dict[area_key, {AreaJName, Facility:[{greeting:{...}}]}] from /_/realtime/<park>_greeting.json
+    Output: list of {name, location, wait_min, status}
+
+    Backwards-compat: returns [] if a string (legacy HTML) is passed.
     """
-    import re as _re
-    soup = BeautifulSoup(html, "html.parser")
+    if isinstance(data, str):
+        return []
+    if not isinstance(data, dict):
+        return []
     out: list[dict] = []
     seen: set[str] = set()
-    candidates = soup.select(".linkList33 li, .realtimeList li, ul li[data-id], section li")
-    for li in candidates:
-        name_el = li.select_one(".heading3, .heading4, .title, h3, h4")
-        if not name_el:
+    for area_key, area in data.items():
+        if not isinstance(area, dict):
             continue
-        name = name_el.get_text(" ", strip=True)
-        if not name or name in seen:
-            continue
-        # Location — typically a sub-paragraph below the name
-        loc_el = li.select_one(".place, .location, .area, p.txt, .txt")
-        location = loc_el.get_text(" ", strip=True) if loc_el else ""
-        # Wait time — number followed by 分 in any badge / span / .timetable
-        full_text = li.get_text(" ", strip=True)
-        # Status detection: 中止 / 休止 / 一時休止 / 終了 / 再開
-        status = "operating"
-        if any(k in full_text for k in ("中止", "休止", "終了", "本日の運営は終了", "受付終了", "実施なし")):
+        location = (area.get("AreaJName") or "").strip()
+        for fac_wrapper in area.get("Facility", []) or []:
+            if not isinstance(fac_wrapper, dict):
+                continue
+            g = fac_wrapper.get("greeting") or {}
+            name = (g.get("FacilityName") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            # Wait time
+            st = g.get("StandbyTime")
+            wait_min = None
+            if isinstance(st, str) and st.strip().isdigit():
+                v = int(st)
+                if 0 <= v <= 480:
+                    wait_min = v
+            # Status: 案内中 (001) → operating; その他 → closed
             status = "closed"
-        # Wait minutes
-        wait_min = None
-        m = _re.search(r"(\d{1,3})\s*分", full_text)
-        if m:
-            wait_min = int(m.group(1))
-            # Cap at 480 to filter ranges that are actually time-of-day
-            if wait_min > 480:
-                wait_min = None
-        out.append({
-            "name": name,
-            "location": location,
-            "wait_min": wait_min,
-            "status": status,
-        })
-        seen.add(name)
+            for slot in g.get("operatinghours", []) or []:
+                if isinstance(slot, dict) and slot.get("OperatingStatusCD") == "001":
+                    status = "operating"
+                    break
+            out.append({
+                "name": name,
+                "location": location,
+                "wait_min": wait_min,
+                "status": status,
+            })
     return out
 
 
@@ -819,13 +845,15 @@ def main() -> int:
         except Exception as e:
             summary["shows"] = {"error": f"ingest: {e}"}
 
-        # Character greetings (realtime wait times)
+        # Character greetings: 公式 JSON API (/_/realtime/<park>_greeting.json) を叩く。
+        # HTML 版は待ち時間を埋め込まなくなったため使用不可（2026-04-27 確認）。
         greetings: dict[str, list[dict]] = {}
-        for park, url in GREETING_URLS.items():
+        for park in GREETING_PARENT.keys():
             try:
-                html_g = render_with_retry(page, url, "main, .linkList33, body")
-                greetings[park] = parse_greetings(html_g)
-                print(f"[parse] greetings {park}: {len(greetings[park])} items", file=sys.stderr)
+                data = fetch_greeting_json(page, park)
+                greetings[park] = parse_greetings(data)
+                op = sum(1 for r in greetings[park] if r["status"] == "operating")
+                print(f"[parse] greetings {park}: {len(greetings[park])} items (operating={op})", file=sys.stderr)
             except Exception as e:
                 print(f"[warn] greetings {park}: {e}", file=sys.stderr)
                 greetings[park] = []
@@ -883,9 +911,17 @@ def main() -> int:
         items_by_source.setdefault("prtimes", []).extend(unique)
 
     # ── X 自動投稿（一括・after first-run seed）──
+    # GHA の actions/cache が効いているか診断するため state を必ず log に出す。
+    _x_state_pre = x_load_state()
+    print(f"[x] state pre-run: seeded={_x_state_pre.get('seeded')} "
+          f"posted_ids={len(_x_state_pre.get('posted_ids', []))} "
+          f"by_date={_x_state_pre.get('by_date', {})} "
+          f"state_file_exists={os.path.exists(X_STATE_FILE)}",
+          file=sys.stderr)
     print(f"[x] enabled={X_ENABLED} hours=[{X_HOUR_START}-{X_HOUR_END}) "
           f"daily_limit={X_DAILY_LIMIT} "
-          f"items_total={sum(len(v) for v in items_by_source.values())}",
+          f"items_total={sum(len(v) for v in items_by_source.values())} "
+          f"items_by_source={{{', '.join(f'{k}:{len(v)}' for k,v in items_by_source.items())}}}",
           file=sys.stderr)
     if X_ENABLED:
         seed = x_seed_if_first_run(items_by_source)
