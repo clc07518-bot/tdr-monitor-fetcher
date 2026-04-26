@@ -1,8 +1,8 @@
 # セッション引き継ぎ — TDR Monitor + ディズニー研究所ブログ
 
 **最終更新**: 2026-04-26
-**最後のコミット**: `ce321e3` (v1.3.1)
-**プラグインバージョン**: 1.3.1（ローカル / GitHub）／ live WP は未アップロード（ユーザー作業待ち）
+**最後のコミット**: v1.3.2（attraction name map 拡充）
+**プラグインバージョン**: 1.3.2（ローカル / GitHub）／ live WP は未アップロード（ユーザー作業待ち）
 
 ---
 
@@ -10,7 +10,7 @@
 
 1. **WP管理画面 → プラグイン → 新規追加 → プラグインのアップロード** で
    `/Users/Yusuke_1/Desktop/tdr-monitor-fetcher/wp-plugin/tdr-today.zip` を選択
-   → 既存の `TDR Today` を上書き有効化（v1.2.x → v1.3.1）
+   → 既存の `TDR Today` を上書き有効化（v1.2.x → v1.3.2）
 
    このアップロードがないと：
    - 新しい REST エンドポイント `/realtime` `/snapshot` `/greetings` が叩けない
@@ -99,6 +99,16 @@ WP プラグイン側:
 - fetcher.py に `parse_realtime()` + `ingest_realtime()`
 - 軽量ポーラー `realtime_poll.py` + ワークフロー `realtime.yml`
 
+### v1.3.2
+- **`tdrt_fix_name()` マップを公式 `/tdl/attraction.html` `/tds/attraction.html` から再構築**（HANDOFF 残課題消化）
+  - エントリ数 ~50 → **111**
+  - **canonical の重大バグ修正 4件**:
+    - 魅惑のチキルーム / 美女と野獣 / モンスターズ・インク … straight `"` → 公式 curly `“ ”` (U+201C/U+201D)
+    - `ティンカーベルのビジーバギー` → 公式は `フェアリー・ティンカーベルのビジーバギー`
+  - TDL 全38アトラクション + TDS 全32アトラクションの identity mapping を投入（DWR 表記揺れ吸収）
+  - `フォートレス・エクスプロレーション“ザ・レオナルドチャレンジ”` 追加
+  - インディ・ジョーンズの `®` は DPA/詳細ページで生きているため canonical 維持
+
 ### v1.3.1（重大なバグ修正）
 - **ユーザー報告：「11:00 と 11:30 全アトラクション同じ待ち時間」**
 - **原因**：DWRプラグインの擬似cronが死んでて `dwr_latest_<park>` がフリーズ
@@ -153,10 +163,9 @@ WP プラグイン側:
 5. **アクセス解析の組み込み** → GA4 / Search Console データを WP に取り込み
 
 ### 次回着手しやすいトピック
-- TDS 公式アトラクション名の正式リスト取得（v1.2.4 で WebFetch タイムアウトしたまま放置）
-  → `fetcher.py` の Playwright で `/tds/attraction.html` を取得して、`tdrt_fix_name()` のマップに追加
+- ~~TDS 公式アトラクション名の正式リスト取得~~（v1.3.2 で完了）
 - 「過去の同じ曜日の待ち時間グラフ」ショートコード
-- DPA 完売時刻の曜日別集計表示
+- DPA 完売時刻の曜日別集計表示（稼ぎ頭 `/dpa_soldout_time/` の強化に直結）
 
 ---
 
