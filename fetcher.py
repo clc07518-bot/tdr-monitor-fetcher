@@ -22,6 +22,13 @@ import time
 from typing import Any, Callable
 from urllib.parse import urljoin
 
+# Force JST: GHA runs in UTC, but X auto-post hour window + park-hours date are JST.
+os.environ.setdefault("TZ", "Asia/Tokyo")
+try:
+    time.tzset()
+except AttributeError:
+    pass
+
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
