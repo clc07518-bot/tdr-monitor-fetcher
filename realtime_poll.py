@@ -23,11 +23,11 @@ from playwright.sync_api import sync_playwright
 
 # Reuse helpers
 from fetcher import (
-    render_with_retry,
+    fetch_realtime_json,
     parse_realtime,
     ingest_realtime,
     trigger_snapshot,
-    REALTIME_URLS,
+    REALTIME_PARENT,
     UA,
 )
 
@@ -68,15 +68,16 @@ def main() -> int:
                 print(f"[warn] stealth_sync failed: {e}", file=sys.stderr)
 
         realtime: dict[str, list[dict]] = {}
-        for park, url in REALTIME_URLS.items():
+        for park in REALTIME_PARENT.keys():
             try:
-                html = render_with_retry(page, url, "main, .linkList33, body")
-                realtime[park] = parse_realtime(html)
+                items = fetch_realtime_json(page, park)
+                realtime[park] = parse_realtime(items)
+                with_w = sum(1 for r in realtime[park] if r["wait_min"] is not None)
                 pp = sum(1 for r in realtime[park] if r["has_pp"])
                 dpa = sum(1 for r in realtime[park] if r["has_dpa"])
                 sbp = sum(1 for r in realtime[park] if r["has_sbp"])
                 print(f"[parse] {park}: {len(realtime[park])} items "
-                      f"(pp={pp} dpa={dpa} sbp={sbp})", file=sys.stderr)
+                      f"(with_wait={with_w} pp={pp} dpa={dpa} sbp={sbp})", file=sys.stderr)
             except Exception as e:
                 print(f"[warn] {park}: {e}", file=sys.stderr)
                 realtime[park] = []

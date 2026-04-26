@@ -93,11 +93,16 @@ GREETINGS_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/greetings" if WP_BASE else "
 # Snapshot trigger (15-min reliable cron without depending on WP-Cron).
 SNAPSHOT_TRIGGER = f"{WP_BASE}/wp-json/tdr-today/v1/snapshot" if WP_BASE else ""
 
-# Realtime page (DPA / PP / SBP badge tracking).
-REALTIME_URLS = {
-    "tdl": "https://www.tokyodisneyresort.jp/tdl/realtime/",
-    "tds": "https://www.tokyodisneyresort.jp/tds/realtime/",
+# Realtime: TDR が公開している内部 JSON API。
+# 2026-04-26 現在、HTML 版の /<park>/realtime/ には待ち時間が一切埋め込まれず、
+# /_/realtime/<park>_attraction.json (Akamai 越し XHR) のみが正解の rate-data 源。
+# 親ページ <park>/realtime/attraction.html を踏んでセッションを確立してから JSON を fetch する。
+REALTIME_PARENT = {
+    "tdl": "https://www.tokyodisneyresort.jp/tdl/realtime/attraction.html",
+    "tds": "https://www.tokyodisneyresort.jp/tds/realtime/attraction.html",
 }
+# 旧 HTML エンドポイント（互換のため定義は残す。利用は廃止。）
+REALTIME_URLS = REALTIME_PARENT
 REALTIME_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/realtime" if WP_BASE else ""
 
 
@@ -542,43 +547,76 @@ def ingest_greetings(per_park: dict[str, list[dict]]) -> dict[str, Any]:
     return {"endpoint": "greetings", "status": r.status_code, **body}
 
 
-def parse_realtime(html: str) -> list[dict]:
-    """Parse /{tdl|tds}/realtime/ for badge presence per attraction.
+def fetch_realtime_json(page, park: str) -> list[dict]:
+    """Fetch /_/realtime/<park>_attraction.json via Playwright session.
 
-    Looks for badges/text within each attraction <li>:
-      - "プライオリティパス"        → has_pp
-      - "ディズニー・プレミアアクセス" or "DPA" → has_dpa
-      - "スタンバイパス"            → has_sbp
-    Also captures wait_min and status (operating/closed).
+    Akamai/WAF blocks naked curl; we need to first navigate to the parent
+    HTML page to establish session cookies, then fetch the JSON via XHR
+    from the same origin.
     """
-    import re as _re
-    soup = BeautifulSoup(html, "html.parser")
+    parent = REALTIME_PARENT[park]
+    page.goto(parent, wait_until="domcontentloaded", timeout=60000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(800)
+    result = page.evaluate(
+        """async (park) => {
+            const r = await fetch('/_/realtime/' + park + '_attraction.json?' + Date.now(), {credentials: 'include'});
+            const t = await r.text();
+            return {status: r.status, text: t};
+        }""",
+        park,
+    )
+    status = result.get("status")
+    if status != 200:
+        raise RuntimeError(f"realtime json HTTP {status} for {park}")
+    return json.loads(result["text"])
+
+
+def parse_realtime(items_or_html) -> list[dict]:
+    """Normalize the realtime JSON list (or skip if HTML is passed in).
+
+    Input: list[dict] from /_/realtime/<park>_attraction.json
+    Output: list of {name, has_pp, has_dpa, has_sbp, wait_min, status}
+
+    Backwards-compat: if a string is passed (legacy HTML callers), return
+    [] — the HTML page no longer exposes wait times.
+    """
+    if isinstance(items_or_html, str):
+        return []
+    items = items_or_html or []
     out: list[dict] = []
     seen: set[str] = set()
-    candidates = soup.select(".linkList33 li, .realtimeList li, ul li[data-id], section li")
-    for li in candidates:
-        name_el = li.select_one(".heading3, .heading4, h3, h4, .title")
-        if not name_el:
-            continue
-        name = name_el.get_text(" ", strip=True)
+    for it in items:
+        name = (it.get("FacilityName") or "").strip()
         if not name or name in seen:
             continue
-        full_text = li.get_text(" ", strip=True)
-        # Skip if this li is clearly not an attraction entry (no name+wait pattern)
-        has_pp  = "プライオリティパス" in full_text
-        has_dpa = ("プレミアアクセス" in full_text) or ("DPA" in full_text)
-        has_sbp = "スタンバイパス" in full_text
-        # Wait time
-        wait_min = None
-        m = _re.search(r"(\d{1,3})\s*分", full_text)
-        if m:
-            v = int(m.group(1))
-            if v <= 480:
+        seen.add(name)
+        # Wait time: StandbyTime is "<int>" str, False, or None
+        st = it.get("StandbyTime")
+        wait_min: int | None = None
+        if isinstance(st, str) and st.strip().isdigit():
+            v = int(st)
+            if 0 <= v <= 480:
                 wait_min = v
         # Status
-        status = "operating"
-        if any(k in full_text for k in ("中止", "休止", "本日終了", "運営終了", "受付終了")):
+        op_cd = it.get("OperatingStatusCD")
+        if op_cd == "001":
+            status = "operating"
+        elif op_cd == "004":  # 一時運営中止
             status = "closed"
+            wait_min = None
+        else:
+            status = "operating"  # null = treat as default-operating
+        # Badges: only consider "currently issuing" (CD == '1')
+        has_dpa = (it.get("DPAStatusCD") == "1")
+        has_pp  = (it.get("PPStatusCD")  == "1")
+        # SBP: Fsflg true and not flagged-off via FsStatusflg/FsStatus
+        fsflg = bool(it.get("Fsflg"))
+        fs_status_flg = it.get("FsStatusflg")
+        has_sbp = fsflg and (fs_status_flg is None)
         out.append({
             "name": name,
             "has_pp": has_pp,
@@ -587,7 +625,6 @@ def parse_realtime(html: str) -> list[dict]:
             "wait_min": wait_min,
             "status": status,
         })
-        seen.add(name)
     return out
 
 
@@ -797,17 +834,19 @@ def main() -> int:
         except Exception as e:
             summary["greetings"] = {"error": f"ingest: {e}"}
 
-        # Realtime page: DPA / PP / SBP badges + wait times → state-transition logging on WP side
+        # Realtime: 公式 JSON API (/_/realtime/<park>_attraction.json) を叩く。
+        # HTML 版 /<park>/realtime/ は待ち時間を埋め込まなくなったため使用不可（2026-04-26 確認）。
         realtime: dict[str, list[dict]] = {}
-        for park, url in REALTIME_URLS.items():
+        for park in REALTIME_PARENT.keys():
             try:
-                html_rt = render_with_retry(page, url, "main, .linkList33, body")
-                realtime[park] = parse_realtime(html_rt)
+                items = fetch_realtime_json(page, park)
+                realtime[park] = parse_realtime(items)
+                with_w = sum(1 for r in realtime[park] if r["wait_min"] is not None)
                 pp = sum(1 for r in realtime[park] if r["has_pp"])
                 dpa = sum(1 for r in realtime[park] if r["has_dpa"])
                 sbp = sum(1 for r in realtime[park] if r["has_sbp"])
                 print(f"[parse] realtime {park}: {len(realtime[park])} items "
-                      f"(pp={pp} dpa={dpa} sbp={sbp})", file=sys.stderr)
+                      f"(with_wait={with_w} pp={pp} dpa={dpa} sbp={sbp})", file=sys.stderr)
             except Exception as e:
                 print(f"[warn] realtime {park}: {e}", file=sys.stderr)
                 realtime[park] = []
