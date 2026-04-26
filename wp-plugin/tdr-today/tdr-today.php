@@ -212,9 +212,24 @@ function tdrt_get_shows($park){
   return isset($stored[$park]) && is_array($stored[$park]) ? $stored[$park] : [];
 }
 
+// Prefer latest, fall back to prev when latest has zero operating items
+// (TDR scrape sometimes returns all "closed" momentarily mid-day).
+function tdrt_wait_data($park){
+  $latest = get_option('dwr_latest_'.$park, []);
+  if(is_array($latest) && !empty($latest)){
+    foreach($latest as $r){
+      if(($r['status'] ?? '') === 'operating' && isset($r['wait_min']) && $r['wait_min'] !== '' && $r['wait_min'] !== null){
+        return $latest;
+      }
+    }
+  }
+  $prev = get_option('dwr_prev_'.$park, []);
+  return is_array($prev) ? $prev : [];
+}
+
 function tdrt_top_waits($park,$lim=10){
   if(!tdrt_is_open($park))return [];
-  $r=get_option('dwr_latest_'.$park,[]);if(!is_array($r))return [];
+  $r=tdrt_wait_data($park);if(!is_array($r))return [];
   usort($r,function($a,$b){
     $aw=isset($a['wait_min'])?(int)$a['wait_min']:-1;$bw=isset($b['wait_min'])?(int)$b['wait_min']:-1;
     return $aw===$bw?0:($aw<$bw?1:-1);
@@ -224,7 +239,7 @@ function tdrt_top_waits($park,$lim=10){
 
 function tdrt_grade($park){
   if(!tdrt_is_open($park))return null;
-  $r=get_option('dwr_latest_'.$park,[]);if(!is_array($r)||empty($r))return null;
+  $r=tdrt_wait_data($park);if(!is_array($r)||empty($r))return null;
   $t=[];foreach($r as $x)if(isset($x['wait_min'])&&$x['wait_min']!=='')$t[]=(int)$x['wait_min'];
   if(empty($t))return null;
   sort($t);$top=array_slice($t,-10);$avg=array_sum($top)/count($top);
