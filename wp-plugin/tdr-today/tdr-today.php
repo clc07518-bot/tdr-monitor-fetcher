@@ -132,13 +132,21 @@ function tdrt_hours($park){
 }
 
 // Is park currently within operating hours? Falls back to 8:00-21:30 default.
+// Compare in minutes-since-midnight: avoids the strcmp("10:45","9:00") < 0 bug
+// where "1" < "9" lexicographically classifies post-9am times as before 9.
+function tdrt_t2m($t){
+  if(!preg_match('/^(\d{1,2}):(\d{2})$/', $t, $m)) return -1;
+  return ((int)$m[1]) * 60 + ((int)$m[2]);
+}
 function tdrt_is_open($park){
-  $h=tdrt_hours($park);
-  $now=current_time('H:i');
+  $now = tdrt_t2m(current_time('H:i'));
+  $h = tdrt_hours($park);
   if($h && isset($h['open']) && isset($h['close'])){
-    return strcmp($now,$h['open'])>=0 && strcmp($now,$h['close'])<0;
+    $o = tdrt_t2m($h['open']);
+    $cl = tdrt_t2m($h['close']);
+    return $o >= 0 && $cl >= 0 && $now >= $o && $now < $cl;
   }
-  return strcmp($now,'08:00')>=0 && strcmp($now,'21:30')<0;
+  return $now >= 480 && $now < 1290; // 08:00 to 21:30
 }
 
 function tdrt_items_by_src($srcs,$lim=100){
