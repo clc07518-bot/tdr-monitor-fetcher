@@ -26,6 +26,7 @@ from fetcher import (
     render_with_retry,
     parse_realtime,
     ingest_realtime,
+    trigger_snapshot,
     REALTIME_URLS,
     UA,
 )
@@ -85,6 +86,11 @@ def main() -> int:
             summary["realtime"] = {"error": f"ingest: {e}"}
 
         browser.close()
+
+    # 待ち時間履歴ヒートマップに反映するためスナップショットを直後にトリガ。
+    # /realtime エンドポイントが tdrt_waits_<park> を上書きしたあとに走らないと
+    # 同じ値が記録され続けてしまう（DWR が止まっている本番環境で観測された問題）。
+    summary["snapshot"] = trigger_snapshot()
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if "error" not in summary.get("realtime", {}) else 1

@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today].
-Version: 1.3.0
+Version: 1.3.1
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -51,7 +51,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.3.0'){tdrt_install();update_option('tdrt_v','1.3.0',false);}
+  if(get_option('tdrt_v','0')!=='1.3.1'){tdrt_install();update_option('tdrt_v','1.3.1',false);}
 });
 
 // DWR plugin の名称が公式表記と微妙にズレているのを補正するマップ。
@@ -155,17 +155,23 @@ function tdrt_aid($en,$jp){return substr(md5($en!==''?$en:$jp),0,16);}
 
 function tdrt_snapshot(){
   global $wpdb;$tbl=tdrt_table();$now=current_time('mysql');$slot=tdrt_slot();$n=0;
-  // park = 'tdl' / 'tds' (アトラクション)、'tdl_g' / 'tds_g' (キャラグリ)
+  // park='tdl'/'tds' は tdrt_wait_data_raw() の優先度判定（tdrt_waits → dwr_latest → dwr_prev）に乗せる。
+  // park='tdl_g'/'tds_g' は キャラグリ専用 option。
   $sources = [
-    'tdl'   => 'dwr_latest_tdl',
-    'tds'   => 'dwr_latest_tds',
+    'tdl'   => null, // tdrt_wait_data_raw('tdl')
+    'tds'   => null, // tdrt_wait_data_raw('tds')
     'tdl_g' => 'tdrt_greet_tdl',
     'tds_g' => 'tdrt_greet_tds',
   ];
   foreach($sources as $park=>$opt_key){
     $base_park = (substr($park,-2)==='_g') ? substr($park,0,3) : $park;
     if(!tdrt_is_open($base_park))continue; // 閉園中は記録しない
-    $rows=get_option($opt_key,[]);if(!is_array($rows))continue;
+    if($opt_key === null){
+      $rows = tdrt_wait_data_raw($base_park);
+    } else {
+      $rows = get_option($opt_key,[]);
+    }
+    if(!is_array($rows))continue;
     foreach($rows as $r){
       $name=isset($r['name'])?(string)$r['name']:'';
       $en=isset($r['name_en'])?(string)$r['name_en']:'';
@@ -319,9 +325,21 @@ function tdrt_get_shows($park){
   return isset($stored[$park]) && is_array($stored[$park]) ? $stored[$park] : [];
 }
 
-// Prefer latest, fall back to prev when latest has zero operating items
-// (TDR scrape sometimes returns all "closed" momentarily mid-day).
+// 優先順位:
+//   1. tdrt_waits_<park> (我々が /realtime endpoint で取得・60分以内のもの) ← DWR が止まっても動く
+//   2. dwr_latest_<park> (DWR plugin の出力)
+//   3. dwr_prev_<park>   (DWR の前回値)
 function tdrt_wait_data_raw($park){
+  $own = get_option('tdrt_waits_'.$park, null);
+  if(is_array($own) && isset($own['rows']) && isset($own['ts'])){
+    if((int)$own['ts'] > (time() - 3600) && is_array($own['rows']) && !empty($own['rows'])){
+      foreach($own['rows'] as $r){
+        if(($r['status'] ?? '') === 'operating' && isset($r['wait_min']) && $r['wait_min'] !== '' && $r['wait_min'] !== null){
+          return $own['rows'];
+        }
+      }
+    }
+  }
   $latest = get_option('dwr_latest_'.$park, []);
   if(is_array($latest) && !empty($latest)){
     foreach($latest as $r){
@@ -737,7 +755,7 @@ add_action('rest_api_init', function(){
             if($wpdb->rows_affected > 0) $events_logged++;
           }
         }
-        // Save current snapshot
+        // Save current snapshot (badge state)
         $serialized = serialize($rows);
         $existing = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $opt_key));
         if($existing){
@@ -746,6 +764,26 @@ add_action('rest_api_init', function(){
           $wpdb->insert($wpdb->options, ['option_name'=>$opt_key,'option_value'=>$serialized,'autoload'=>'no'], ['%s','%s','%s']);
         }
         wp_cache_delete($opt_key, 'options');
+        // Also save in DWR-compatible shape so tdrt_wait_data() / tdrt_snapshot() can use it
+        // when DWR plugin's pseudo-cron is not running. Includes timestamp for freshness check.
+        $waits_compat = [];
+        foreach($rows as $r){
+          if(empty($r['name'])) continue;
+          $waits_compat[] = [
+            'name'     => $r['name'],
+            'wait_min' => $r['wait_min'] ?? null,
+            'status'   => $r['status'] ?? 'operating',
+          ];
+        }
+        $waits_payload = serialize(['rows'=>$waits_compat, 'ts'=>time()]);
+        $waits_key = 'tdrt_waits_'.$park;
+        $wexisting = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $waits_key));
+        if($wexisting){
+          $wpdb->update($wpdb->options, ['option_value'=>$waits_payload,'autoload'=>'no'], ['option_name'=>$waits_key], ['%s','%s'], ['%s']);
+        } else {
+          $wpdb->insert($wpdb->options, ['option_name'=>$waits_key,'option_value'=>$waits_payload,'autoload'=>'no'], ['%s','%s','%s']);
+        }
+        wp_cache_delete($waits_key, 'options');
         $stored[$park] = count($rows);
       }
       update_option('tdrt_realtime_last', time(), false);
