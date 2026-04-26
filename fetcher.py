@@ -305,7 +305,62 @@ PARSERS: dict[str, Callable[[str, str], list[dict]]] = {
 }
 
 
+XSTATE_REMOTE = f"{WP_BASE}/wp-json/tdr-today/v1/xstate" if WP_BASE else ""
+
+
+def _x_remote_get() -> dict | None:
+    """Return state dict from WP, or None if endpoint unavailable / error."""
+    if not XSTATE_REMOTE or not TOKEN:
+        return None
+    try:
+        r = requests.get(
+            XSTATE_REMOTE,
+            headers={"X-TDR-Token": TOKEN},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return None
+        body = r.json()
+        if not isinstance(body, dict):
+            return None
+        st = body.get("state")
+        # WP returns {} as a dict; an empty dict means "no state yet"
+        if not isinstance(st, dict) or body.get("empty"):
+            return None
+        return st
+    except Exception as e:
+        print(f"[warn] x_remote_get: {e}", file=sys.stderr)
+        return None
+
+
+def _x_remote_put(state: dict) -> bool:
+    if not XSTATE_REMOTE or not TOKEN:
+        return False
+    try:
+        r = requests.post(
+            XSTATE_REMOTE,
+            headers={"X-TDR-Token": TOKEN, "Content-Type": "application/json"},
+            data=json.dumps(state, ensure_ascii=False).encode("utf-8"),
+            timeout=10,
+        )
+        return r.status_code == 200
+    except Exception as e:
+        print(f"[warn] x_remote_put: {e}", file=sys.stderr)
+        return False
+
+
 def x_load_state() -> dict:
+    """Load X auto-poster state. WP option preferred (durable across GHA
+    cache loss); falls back to local file; finally to fresh empty state."""
+    remote = _x_remote_get()
+    if remote is not None:
+        # Mirror to local file so subsequent in-process calls hit the same data
+        try:
+            with open(X_STATE_FILE, "w") as f:
+                json.dump(remote, f, ensure_ascii=False)
+        except Exception:
+            pass
+        return remote
     try:
         with open(X_STATE_FILE) as f:
             return json.load(f)
@@ -314,11 +369,16 @@ def x_load_state() -> dict:
 
 
 def x_save_state(state: dict) -> None:
+    # Always write file (cheap and lets in-process callers cache)
     try:
         with open(X_STATE_FILE, "w") as f:
             json.dump(state, f, ensure_ascii=False)
     except Exception as e:
-        print(f"[warn] x_save_state: {e}", file=sys.stderr)
+        print(f"[warn] x_save_state file: {e}", file=sys.stderr)
+    # Mirror to WP so we survive GHA cache eviction.
+    if not _x_remote_put(state):
+        # Soft-fail: file is still updated locally
+        pass
 
 
 def x_seed_if_first_run(all_items_by_source: dict[str, list[dict]]) -> dict:
@@ -911,12 +971,13 @@ def main() -> int:
         items_by_source.setdefault("prtimes", []).extend(unique)
 
     # ── X 自動投稿（一括・after first-run seed）──
-    # GHA の actions/cache が効いているか診断するため state を必ず log に出す。
+    # state は WP option (tdrt_x_state) を優先的に取りに行く。WP に無ければ file fallback。
+    _x_remote_pre = _x_remote_get()
     _x_state_pre = x_load_state()
     print(f"[x] state pre-run: seeded={_x_state_pre.get('seeded')} "
           f"posted_ids={len(_x_state_pre.get('posted_ids', []))} "
           f"by_date={_x_state_pre.get('by_date', {})} "
-          f"state_file_exists={os.path.exists(X_STATE_FILE)}",
+          f"source={'wp' if _x_remote_pre is not None else ('file' if os.path.exists(X_STATE_FILE) else 'fresh')}",
           file=sys.stderr)
     print(f"[x] enabled={X_ENABLED} hours=[{X_HOUR_START}-{X_HOUR_END}) "
           f"daily_limit={X_DAILY_LIMIT} "
@@ -924,7 +985,19 @@ def main() -> int:
           f"items_by_source={{{', '.join(f'{k}:{len(v)}' for k,v in items_by_source.items())}}}",
           file=sys.stderr)
     if X_ENABLED:
-        seed = x_seed_if_first_run(items_by_source)
+        # X_BACKFILL=1: 1回限りの動作確認用。seed をスキップし、全件 post_to_x を回す。
+        # daily_limit (15) で flood は capped。posted_ids もリセットして既存ID も投稿可。
+        backfill = os.environ.get("X_BACKFILL", "0").lower() in ("1", "true", "yes")
+        if backfill:
+            print("[x] X_BACKFILL=1 → bypassing seed, resetting posted_ids/by_date for one-shot verification", file=sys.stderr)
+            _bf_state = x_load_state()
+            _bf_state["posted_ids"] = []
+            _bf_state["by_date"] = {}
+            _bf_state["seeded"] = True  # 同run内で seed が再走行しないように
+            x_save_state(_bf_state)
+            seed = {"seeded": False, "backfill": True}
+        else:
+            seed = x_seed_if_first_run(items_by_source)
         if seed.get("seeded"):
             summary["x_seed"] = {"seeded_count": seed.get("seeded_count", 0),
                                   "note": "first-run: existing items recorded, no posts"}

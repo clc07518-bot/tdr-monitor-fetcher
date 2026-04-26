@@ -6,6 +6,11 @@ on:
     # tier for private repos (~1,440 min/month at ~1 min/run).
     - cron: '*/30 * * * *'
   workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'X_BACKFILL: bypass seed and post latest items (verification mode)'
+        type: boolean
+        default: false
   push:
     branches: [ main ]
 
@@ -56,6 +61,7 @@ jobs:
           X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          X_BACKFILL: ${{ inputs.backfill && '1' || '0' }}
         run: python fetcher.py
 
       - name: Save X auto-poster state

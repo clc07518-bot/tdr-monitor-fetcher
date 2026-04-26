@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.3.3
+Version: 1.3.6
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -51,7 +51,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.3.3'){tdrt_install();update_option('tdrt_v','1.3.3',false);}
+  if(get_option('tdrt_v','0')!=='1.3.6'){tdrt_install();update_option('tdrt_v','1.3.6',false);}
 });
 
 // DWR plugin の名称が公式表記と微妙にズレているのを補正するマップ。
@@ -1009,6 +1009,47 @@ add_action('rest_api_init', function(){
       update_option('tdrt_realtime_last', time(), false);
       return ['ok'=>true, 'stored'=>$stored, 'events_logged'=>$events_logged, 'now'=>time()];
     },
+  ]);
+});
+
+// REST: /tdr-today/v1/xstate — durable storage for fetcher.py の X 自動投稿 state.
+// GHA actions/cache が runs を跨いで .x_state.json を保てない場合の代替経路。
+// GET: 現在の state JSON を返す（無ければ {}）
+// POST: 受け取った JSON をそのまま option `tdrt_x_state` に保存
+add_action('rest_api_init', function(){
+  $auth = function($req){
+    $token = (string) $req->get_header('x-tdr-token');
+    $expected = (string) get_option('tdr_mon_ingest_token', '');
+    return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+  };
+  register_rest_route('tdr-today/v1', '/xstate', [
+    [
+      'methods' => 'GET',
+      'permission_callback' => $auth,
+      'callback' => function($req){
+        $raw = get_option('tdrt_x_state', '');
+        if($raw === '' || $raw === null) return ['state' => new stdClass(), 'empty' => true];
+        $d = json_decode($raw, true);
+        if(!is_array($d)) return ['state' => new stdClass(), 'empty' => true, 'corrupt' => true];
+        return ['state' => $d, 'empty' => false, 'updated_at' => (int) get_option('tdrt_x_state_at', 0)];
+      },
+    ],
+    [
+      'methods' => 'POST',
+      'permission_callback' => $auth,
+      'callback' => function($req){
+        $body = $req->get_json_params();
+        if(!is_array($body)) return new WP_Error('bad_json', 'expected JSON object', ['status'=>400]);
+        // Validate shape lightly: should have at least one of seeded/posted_ids/by_date
+        $payload = wp_json_encode($body);
+        if($payload === false || strlen($payload) > 200000){
+          return new WP_Error('too_big', 'state payload >200KB', ['status'=>413]);
+        }
+        update_option('tdrt_x_state', $payload, false);
+        update_option('tdrt_x_state_at', time(), false);
+        return ['ok' => true, 'bytes' => strlen($payload), 'now' => time()];
+      },
+    ],
   ]);
 });
 
