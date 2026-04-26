@@ -295,7 +295,7 @@ def x_load_state() -> dict:
         with open(X_STATE_FILE) as f:
             return json.load(f)
     except Exception:
-        return {"posted_ids": [], "by_date": {}}
+        return {"posted_ids": [], "by_date": {}, "seeded": False}
 
 
 def x_save_state(state: dict) -> None:
@@ -306,6 +306,30 @@ def x_save_state(state: dict) -> None:
         print(f"[warn] x_save_state: {e}", file=sys.stderr)
 
 
+def x_seed_if_first_run(all_items_by_source: dict[str, list[dict]]) -> dict:
+    """初回実行時 (state.seeded != True) は posted_ids に既存全 ID を入れて
+    過去記事の連投を防ぐ。次回以降に検出された 'new' のみがポスト対象になる。
+    Returns: {"seeded": bool, "seeded_count": int}
+    """
+    state = x_load_state()
+    if state.get("seeded"):
+        return {"seeded": False}
+    seeded_count = 0
+    posted_ids = set(state.get("posted_ids", []))
+    for src, items in all_items_by_source.items():
+        if src not in X_ALLOWED_SOURCES:
+            continue
+        for it in items:
+            iid = it.get("id")
+            if iid and iid not in posted_ids:
+                posted_ids.add(iid)
+                seeded_count += 1
+    state["posted_ids"] = list(posted_ids)
+    state["seeded"] = True
+    x_save_state(state)
+    return {"seeded": True, "seeded_count": seeded_count}
+
+
 def post_to_x(item: dict) -> dict:
     """Post a single item to X with safety constraints.
 
@@ -313,8 +337,9 @@ def post_to_x(item: dict) -> dict:
     """
     if not X_ENABLED:
         return {"posted": False, "reason": "x_disabled"}
-    if item.get("source") not in X_ALLOWED_SOURCES:
-        return {"posted": False, "reason": f"source_filtered:{item.get('source')}"}
+    src = item.get("source")
+    if src not in X_ALLOWED_SOURCES:
+        return {"posted": False, "reason": f"source_filtered:{src}"}
     now = time.localtime()
     if not (X_HOUR_START <= now.tm_hour < X_HOUR_END):
         return {"posted": False, "reason": f"out_of_hours:{now.tm_hour}"}
@@ -325,6 +350,8 @@ def post_to_x(item: dict) -> dict:
     if today_count >= X_DAILY_LIMIT:
         return {"posted": False, "reason": f"daily_limit:{today_count}"}
 
+    # 初回実行（posted_ids が空）は過去記事を一気にポストしないようシード扱い。
+    # 呼び出し側で先に x_seed_if_first_run() するためここでは記録のみ。
     item_id = item.get("id", "")
     if item_id and item_id in state.get("posted_ids", []):
         return {"posted": False, "reason": "already_posted"}
@@ -588,6 +615,10 @@ def ingest(source: str, items: list[dict]) -> dict[str, Any]:
 
 def main() -> int:
     summary: dict[str, Any] = {}
+    # 各ソースの items を1度貯めてから、最後に first-run-seed → 投稿ループ
+    # （first-run時点で過去記事が大量に流れるのを防ぐ）
+    items_by_source: dict[str, list[dict]] = {}
+
     with sync_playwright() as p:
         launch_kwargs = {
             "headless": True,
@@ -642,14 +673,10 @@ def main() -> int:
             print(f"[parse] {key} items={len(unique)}", file=sys.stderr)
             res = ingest(key, unique)
             summary[key] = res
-            if X_ENABLED:
-                x_results = []
-                for it in unique:
-                    r = post_to_x(it)
-                    if r.get("posted"):
-                        x_results.append({"title": r.get("title"), "tweet_id": r.get("tweet_id")})
-                if x_results:
-                    summary.setdefault("x_posts", []).extend(x_results)
+            # X 投稿は後回し（first-run-seed 後に一括処理）
+            for it in unique:
+                it["source"] = key
+            items_by_source.setdefault(key, []).extend(unique)
 
         # Park calendar (today's TDL/TDS hours)
         try:
@@ -716,6 +743,55 @@ def main() -> int:
                 break
         print(f"[parse] prtimes items={len(unique)} ({dur}s)", file=sys.stderr)
         summary["prtimes"] = ingest("prtimes", unique)
+        # X 投稿のために source 注入してプール
+        for it in unique:
+            it["source"] = "prtimes"
+        items_by_source.setdefault("prtimes", []).extend(unique)
+
+    # ── X 自動投稿（一括・after first-run seed）──
+    print(f"[x] enabled={X_ENABLED} hours=[{X_HOUR_START}-{X_HOUR_END}) "
+          f"daily_limit={X_DAILY_LIMIT} "
+          f"items_total={sum(len(v) for v in items_by_source.values())}",
+          file=sys.stderr)
+    if X_ENABLED:
+        seed = x_seed_if_first_run(items_by_source)
+        if seed.get("seeded"):
+            summary["x_seed"] = {"seeded_count": seed.get("seeded_count", 0),
+                                  "note": "first-run: existing items recorded, no posts"}
+            print(f"[x] first-run seeded {seed.get('seeded_count')} items, "
+                  f"no posts this run", file=sys.stderr)
+        else:
+            x_results: list[dict] = []
+            x_filtered: dict[str, int] = {}
+            for src in ("urgent", "olc_tdr", "update", "prtimes"):  # 優先度順
+                for it in items_by_source.get(src, []):
+                    r = post_to_x(it)
+                    if r.get("posted"):
+                        x_results.append({
+                            "source": src,
+                            "title": r.get("title"),
+                            "tweet_id": r.get("tweet_id"),
+                        })
+                        print(f"[x] posted {src}: {r.get('title')} → {r.get('tweet_id')}",
+                              file=sys.stderr)
+                    else:
+                        reason = r.get("reason", "unknown")
+                        x_filtered[reason] = x_filtered.get(reason, 0) + 1
+            if x_results:
+                summary["x_posts"] = x_results
+            if x_filtered:
+                summary["x_filtered"] = x_filtered
+                print(f"[x] filtered: {x_filtered}", file=sys.stderr)
+    else:
+        missing = []
+        if not X_CK: missing.append("X_CONSUMER_KEY")
+        if not X_CS: missing.append("X_CONSUMER_SECRET")
+        if not X_AT: missing.append("X_ACCESS_TOKEN")
+        if not X_ATS: missing.append("X_ACCESS_TOKEN_SECRET")
+        summary["x_disabled"] = {
+            "missing_env": missing,
+            "x_auto_post_env": os.environ.get("X_AUTO_POST", "1"),
+        }
 
     # Trigger snapshot AFTER all data is ingested (so 15-min historical record uses fresh data).
     summary["snapshot"] = trigger_snapshot()
