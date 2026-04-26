@@ -1,0 +1,37 @@
+name: TDR Snapshot Ping
+
+# 15分毎に WP の /tdr-today/v1/snapshot を叩いて待ち時間ヒストリへ確実に記録する。
+# fetcher.py 本体は monitor.yml が30分毎に走らせているが、その間隔を15分にすると
+# GHA 無料枠 (2,000分/月) を超える。スナップショットだけは curl 1発なので毎回 ~10秒、
+# */15 で 96runs/day × 1min/run(billing) = 2880min/月 …これも超える。
+# よって monitor.yml と組み合わせて *偶数15分* (15/45) のみ走らせ、月 ~1440min に抑える。
+#   :00 (monitor: full fetch + snapshot)
+#   :15 (snapshot only) ← このワークフロー
+#   :30 (monitor: full fetch + snapshot)
+#   :45 (snapshot only) ← このワークフロー
+on:
+  schedule:
+    - cron: '15,45 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: tdr-snapshot
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Trigger snapshot
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
+        run: |
+          curl -fsS -X POST "$WP_BASE/wp-json/tdr-today/v1/snapshot" \
+            -H "X-TDR-Token: $WP_INGEST_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{}' \
+            --max-time 30 | tee /tmp/snap.json
+          echo
+          echo "✓ snapshot triggered"

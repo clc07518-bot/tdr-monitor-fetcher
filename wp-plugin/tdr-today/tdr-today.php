@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ。Shortcode [tdr_today_hub], [tdr_today_heatmap].
-Version: 1.2.1
+Version: 1.2.4
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -34,8 +34,89 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.2.1'){tdrt_install();update_option('tdrt_v','1.2.1',false);}
+  if(get_option('tdrt_v','0')!=='1.2.4'){tdrt_install();update_option('tdrt_v','1.2.4',false);}
 });
+
+// DWR plugin の名称が公式表記と微妙にズレているのを補正するマップ。
+// 公式: https://www.tokyodisneyresort.jp/tdl/attraction.html / /tds/attraction.html
+// キーは DWR が保持している name(誤・略称・英名)、値は公式の正式名称。
+function tdrt_fix_name($n){
+  static $map = null;
+  if($map === null){
+    $map = [
+      // ── TDL ──
+      'プーさゕのハニーハント' => 'プーさんのハニーハント',
+      "The Enchanted Tiki Room: Stitch Presents 'Aloha E Komo Mai!'" => '魅惑のチキルーム：スティッチ・プレゼンツ"アロハ・エ・コモ・マイ！"',
+      '魅惑のチキルーム' => '魅惑のチキルーム：スティッチ・プレゼンツ"アロハ・エ・コモ・マイ！"',
+      '魅惑のチキルーム：スティッチ・プレゼンツ"アロハ・エ・コモ・マイ！"' => '魅惑のチキルーム：スティッチ・プレゼンツ"アロハ・エ・コモ・マイ！"',
+      "it's a small world" => 'イッツ・ア・スモールワールド',
+      "It's a small world" => 'イッツ・ア・スモールワールド',
+      'イッツ・ア・スモールワールド with Groot' => 'イッツ・ア・スモールワールド',
+      "it's a small world with Groot" => 'イッツ・ア・スモールワールド',
+      'スター・ツアーズ' => 'スター・ツアーズ：ザ・アドベンチャーズ・コンティニュー',
+      'Star Tours: The Adventures Continue' => 'スター・ツアーズ：ザ・アドベンチャーズ・コンティニュー',
+      'ジャングルクルーズ' => 'ジャングルクルーズ：ワイルドライフ・エクスペディション',
+      'Jungle Cruise: Wildlife Expeditions' => 'ジャングルクルーズ：ワイルドライフ・エクスペディション',
+      '美女と野獣 魔法のものがたり' => '美女と野獣"魔法のものがたり"',
+      '美女と野獣"魔法のものがたり"' => '美女と野獣"魔法のものがたり"',
+      'モンスターズ・インク' => 'モンスターズ・インク"ライド＆ゴーシーク！"',
+      'モンスターズ・インク ライド&ゴーシーク!' => 'モンスターズ・インク"ライド＆ゴーシーク！"',
+      'モンスターズ・インク ライド＆ゴーシーク！' => 'モンスターズ・インク"ライド＆ゴーシーク！"',
+      'Monsters, Inc. Ride & Go Seek!' => 'モンスターズ・インク"ライド＆ゴーシーク！"',
+      'ビーバーブラザーズのカヌー探検' => 'ビーバーブラザーズのカヌー探険',
+      'カントリーベア' => 'カントリーベア・シアター',
+      'シンデレラのフェアリーテイルホール' => 'シンデレラのフェアリーテイル・ホール',
+      'Big Thunder Mountain' => 'ビッグサンダー・マウンテン',
+      'Splash Mountain' => 'スプラッシュ・マウンテン',
+      'Haunted Mansion' => 'ホーンテッドマンション',
+      "Mickey's PhilharMagic" => 'ミッキーのフィルハーマジック',
+      'Pooh\'s Hunny Hunt' => 'プーさんのハニーハント',
+      'Stitch Encounter' => 'スティッチ・エンカウンター',
+      "Baymax's Happy Ride" => 'ベイマックスのハッピーライド',
+      "Pirates of the Caribbean" => 'カリブの海賊',
+      "Western River Railroad" => 'ウエスタンリバー鉄道',
+      // ── TDS（よくあるDWR表記揺れ）──
+      "ソアリン" => 'ソアリン：ファンタスティック・フライト',
+      "ソアリン:ファンタスティック・フライト" => 'ソアリン：ファンタスティック・フライト',
+      "Soaring: Fantastic Flight" => 'ソアリン：ファンタスティック・フライト',
+      "トイ・ストーリー・マニア" => 'トイ・ストーリー・マニア！',
+      "Toy Story Mania!" => 'トイ・ストーリー・マニア！',
+      "ニモ&フレンズ・シーライダー" => 'ニモ＆フレンズ・シーライダー',
+      "Nemo & Friends SeaRider" => 'ニモ＆フレンズ・シーライダー',
+      "インディ・ジョーンズ・アドベンチャー" => 'インディ・ジョーンズ®・アドベンチャー：クリスタルスカルの魔宮',
+      "インディ・ジョーンズ(R)・アドベンチャー：クリスタルスカルの魔宮" => 'インディ・ジョーンズ®・アドベンチャー：クリスタルスカルの魔宮',
+      "タワー・オブ・テラー" => 'タワー・オブ・テラー',
+      "センター・オブ・ジ・アース" => 'センター・オブ・ジ・アース',
+      "海底2万マイル" => '海底2万マイル',
+      "アナとエルサのフローズンジャーニー" => 'アナとエルサのフローズンジャーニー',
+      "ピーターパンのネバーランドアドベンチャー" => 'ピーターパンのネバーランドアドベンチャー',
+      "ラプンツェルのランタンフェスティバル" => 'ラプンツェルのランタンフェスティバル',
+      "ティンカーベルのビジーバギー" => 'ティンカーベルのビジーバギー',
+      "フォートレス・エクスプロレーション" => 'フォートレス・エクスプロレーション',
+      "シンドバッド・ストーリーブック・ヴォヤッジ" => 'シンドバッド・ストーリーブック・ヴォヤッジ',
+      "マジックランプシアター" => 'マジックランプシアター',
+      "ジャスミンのフライングカーペット" => 'ジャスミンのフライングカーペット',
+      "キャラバンカルーセル" => 'キャラバンカルーセル',
+      "アクアトピア" => 'アクアトピア',
+      "レイジングスピリッツ" => 'レイジングスピリッツ',
+      "タートル・トーク" => 'タートル・トーク',
+      "マーメイドラグーンシアター" => 'マーメイドラグーンシアター',
+      "フランダーのフライングフィッシュコースター" => 'フランダーのフライングフィッシュコースター',
+      "スカットルのスクーター" => 'スカットルのスクーター',
+      "ジャンピン・ジェリーフィッシュ" => 'ジャンピン・ジェリーフィッシュ',
+      "ブローフィッシュ・バルーンレース" => 'ブローフィッシュ・バルーンレース',
+      "ワールプール" => 'ワールプール',
+      "アリエルのプレイグラウンド" => 'アリエルのプレイグラウンド',
+      "ヴェネツィアン・ゴンドラ" => 'ヴェネツィアン・ゴンドラ',
+      "ディズニーシー・トランジットスチーマーライン" => 'ディズニーシー・トランジットスチーマーライン',
+      "ディズニーシー・エレクトリックレールウェイ" => 'ディズニーシー・エレクトリックレールウェイ',
+      "ビッグシティ・ヴィークル" => 'ビッグシティ・ヴィークル',
+    ];
+  }
+  // trim して比較（DWR が末尾に空白を含むことがある）
+  $key = trim((string)$n);
+  return $map[$key] ?? $n;
+}
 
 add_filter('cron_schedules',function($s){
   if(!isset($s['tdrt_15min']))$s['tdrt_15min']=['interval'=>900,'display'=>'TDRT 15min'];
@@ -57,14 +138,23 @@ function tdrt_aid($en,$jp){return substr(md5($en!==''?$en:$jp),0,16);}
 
 function tdrt_snapshot(){
   global $wpdb;$tbl=tdrt_table();$now=current_time('mysql');$slot=tdrt_slot();$n=0;
-  foreach(['tdl','tds'] as $park){
-    if(!tdrt_is_open($park))continue; // 閉園中は記録しない
-    $rows=get_option('dwr_latest_'.$park,[]);if(!is_array($rows))continue;
+  // park = 'tdl' / 'tds' (アトラクション)、'tdl_g' / 'tds_g' (キャラグリ)
+  $sources = [
+    'tdl'   => 'dwr_latest_tdl',
+    'tds'   => 'dwr_latest_tds',
+    'tdl_g' => 'tdrt_greet_tdl',
+    'tds_g' => 'tdrt_greet_tds',
+  ];
+  foreach($sources as $park=>$opt_key){
+    $base_park = (substr($park,-2)==='_g') ? substr($park,0,3) : $park;
+    if(!tdrt_is_open($base_park))continue; // 閉園中は記録しない
+    $rows=get_option($opt_key,[]);if(!is_array($rows))continue;
     foreach($rows as $r){
       $name=isset($r['name'])?(string)$r['name']:'';
       $en=isset($r['name_en'])?(string)$r['name_en']:'';
       if($name===''&&$en==='')continue;
       $aid=tdrt_aid($en,$name);
+      $name=tdrt_fix_name($name); // 公式表記へ正規化してから保存
       $w=(isset($r['wait_min'])&&$r['wait_min']!==''&&$r['wait_min']!==null)?(int)$r['wait_min']:null;
       $st=isset($r['status'])?(string)$r['status']:'';
       $cols='park,attr_id,attr_name,wait_min,status,recorded_at,slot_key';
@@ -214,7 +304,7 @@ function tdrt_get_shows($park){
 
 // Prefer latest, fall back to prev when latest has zero operating items
 // (TDR scrape sometimes returns all "closed" momentarily mid-day).
-function tdrt_wait_data($park){
+function tdrt_wait_data_raw($park){
   $latest = get_option('dwr_latest_'.$park, []);
   if(is_array($latest) && !empty($latest)){
     foreach($latest as $r){
@@ -226,6 +316,15 @@ function tdrt_wait_data($park){
   $prev = get_option('dwr_prev_'.$park, []);
   return is_array($prev) ? $prev : [];
 }
+function tdrt_wait_data($park){
+  $rows = tdrt_wait_data_raw($park);
+  if(!is_array($rows)) return [];
+  foreach($rows as &$r){
+    if(isset($r['name'])) $r['name'] = tdrt_fix_name($r['name']);
+  }
+  unset($r);
+  return $rows;
+}
 
 function tdrt_top_waits($park,$lim=10){
   if(!tdrt_is_open($park))return [];
@@ -235,6 +334,27 @@ function tdrt_top_waits($park,$lim=10){
     return $aw===$bw?0:($aw<$bw?1:-1);
   });
   return array_slice($r,0,$lim);
+}
+
+// キャラクターグリーティング: fetcher.py が `tdrt_greet_tdl` / `tdrt_greet_tds` に書き込む
+function tdrt_greet_data($park){
+  $rows = get_option('tdrt_greet_'.$park, []);
+  if(!is_array($rows)) return [];
+  foreach($rows as &$r){
+    if(isset($r['name'])) $r['name'] = tdrt_fix_name($r['name']);
+  }
+  unset($r);
+  return $rows;
+}
+function tdrt_top_greets($park, $lim=10){
+  if(!tdrt_is_open($park))return [];
+  $r = tdrt_greet_data($park);
+  if(!is_array($r))return [];
+  usort($r, function($a,$b){
+    $aw=isset($a['wait_min'])?(int)$a['wait_min']:-1;$bw=isset($b['wait_min'])?(int)$b['wait_min']:-1;
+    return $aw===$bw?0:($aw<$bw?1:-1);
+  });
+  return array_slice($r, 0, $lim);
 }
 
 function tdrt_grade($park){
@@ -276,6 +396,7 @@ function tdrt_hub($a){
   $pc=$park==='tdl'?'#1d4f91':'#0a8aa6';
   $h=tdrt_hours($park);$he=tdrt_fetch_happy_entry();$he_time=$he[$park]??null;$open_eff=$he_time?tdrt_add_minutes($he_time,15):($h['open']??null);$close_eff=$h['close']??null;$w=tdrt_weather();$g=tdrt_grade($park);
   $tw=tdrt_top_waits($park);
+  $tg=tdrt_top_greets($park);
   $is_open=tdrt_is_open($park);
   $stops_raw=tdrt_items_by_src($park==='tdl'?'stop_tdl':'stop_tds',100);
   $stops_today=tdrt_filter_stopped_today($stops_raw);
@@ -317,6 +438,25 @@ function tdrt_hub($a){
 <p style="text-align:right;margin-top:8px"><a href="<?php echo home_url('/'.$park.'-wait-ranking/');?>" style="font-size:12px">全アトラクションを見る →</a></p>
 <?php elseif(!$is_open):?><p style="color:#888;text-align:center;padding:16px;background:#f8f8f8;border-radius:8px">🌙 現在パークは営業時間外です。<br>明日の開園後にリアルタイム待ち時間を表示します。</p>
 <?php else:?><p style="color:#aaa;text-align:center">データ取得中…</p><?php endif;?>
+<?php if($tg): ?>
+<h3>🤝 キャラクターグリーティング 待ち時間</h3>
+<ul class="l">
+<?php foreach($tg as $i=>$r): $nm=$r['name']??''; $loc=$r['location']??''; $wm=isset($r['wait_min'])?(int)$r['wait_min']:-1; $st=$r['status']??''; ?>
+<li>
+  <div class="r <?php echo $i<3?'rt':'';?>"><?php echo $i+1;?></div>
+  <div class="n"><?php echo esc_html($nm);?><?php if($loc):?><br><span style="font-size:11px;color:#888"><?php echo esc_html($loc);?></span><?php endif;?></div>
+  <?php if($st&&$st!=='operating'):?><div class="w ws">中止</div>
+  <?php elseif($wm>=0):?><div class="w"><?php echo $wm;?><small>分</small></div>
+  <?php else:?><div class="w ws">—</div><?php endif;?>
+</li>
+<?php endforeach; ?>
+</ul>
+<p style="text-align:right;margin-top:8px"><a href="<?php echo home_url('/today-'.$park.'/#greet-history');?>" style="font-size:12px">過去の待ち時間推移を見る ↓</a></p>
+<?php elseif($is_open): ?>
+<h3>🤝 キャラクターグリーティング 待ち時間</h3>
+<p style="color:#aaa;text-align:center;padding:12px;background:#f8f8f8;border-radius:8px;font-size:12px">本日のグリーティング情報を取得中…（10分前後で反映されます）</p>
+<?php endif; ?>
+
 <h3>🚫 今日の休止施設 (<?php echo $stops_total;?>件)</h3>
 <?php
 // TDL は ショー＋パレードを「ショー・パレード」として合体表示。TDS は ショーのみ。
@@ -370,13 +510,15 @@ add_shortcode('tdr_today_hub','tdrt_hub');
 
 function tdrt_heatmap($a){
   global $wpdb;
-  $a=shortcode_atts(['park'=>'tdl'],$a,'tdr_today_heatmap');
-  $park=strtolower($a['park'])==='tds'?'tds':'tdl';
+  $a=shortcode_atts(['park'=>'tdl','type'=>'attr'],$a,'tdr_today_heatmap');
+  $base=strtolower($a['park'])==='tds'?'tds':'tdl';
+  // type='greet' なら park='tdl_g'/'tds_g'、'attr' (default) なら park='tdl'/'tds'
+  $park = ($a['type']==='greet') ? $base.'_g' : $base;
   $tbl=tdrt_table();$today=wp_date('Y-m-d');
   $rows=$wpdb->get_results($wpdb->prepare("SELECT attr_id,attr_name,wait_min,status,slot_key FROM {$tbl} WHERE park=%s AND DATE(recorded_at)=%s ORDER BY slot_key ASC",$park,$today));
   if(!$rows)return '<p style="text-align:center;color:#aaa;padding:20px">本日のデータはまだありません。15分ごとに自動収集中。</p>';
   $m=[];$nm=[];$sl=[];$tot=[];
-  foreach($rows as $r){$m[$r->attr_id][(int)$r->slot_key]=['w'=>$r->wait_min===null?null:(int)$r->wait_min,'s'=>$r->status];$nm[$r->attr_id]=$r->attr_name;$sl[(int)$r->slot_key]=1;if($r->wait_min!==null)$tot[$r->attr_id]=($tot[$r->attr_id]??0)+(int)$r->wait_min;}
+  foreach($rows as $r){$m[$r->attr_id][(int)$r->slot_key]=['w'=>$r->wait_min===null?null:(int)$r->wait_min,'s'=>$r->status];$nm[$r->attr_id]=tdrt_fix_name($r->attr_name);$sl[(int)$r->slot_key]=1;if($r->wait_min!==null)$tot[$r->attr_id]=($tot[$r->attr_id]??0)+(int)$r->wait_min;}
   $ks=array_keys($sl);sort($ks);arsort($tot);
   $ord=array_merge(array_keys($tot),array_diff(array_keys($nm),array_keys($tot)));
   $cls=function($w){if($w===null)return 'h0';if($w>=180)return 'h6';if($w>=120)return 'h5';if($w>=80)return 'h4';if($w>=50)return 'h3';if($w>=20)return 'h2';return 'h1';};
@@ -401,6 +543,74 @@ function tdrt_heatmap($a){
 <?php return ob_get_clean();
 }
 add_shortcode('tdr_today_heatmap','tdrt_heatmap');
+
+// REST: /tdr-today/v1/snapshot — manually trigger snapshot from external cron (cron-job.org / GHA)
+// 擬似 WP-Cron に依存しない確実な15分間隔記録のため。
+add_action('rest_api_init', function(){
+  register_rest_route('tdr-today/v1', '/snapshot', [
+    'methods' => 'POST',
+    'permission_callback' => function($req){
+      $token = (string) $req->get_header('x-tdr-token');
+      $expected = (string) get_option('tdr_mon_ingest_token', '');
+      return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+    },
+    'callback' => function($req){
+      tdrt_snapshot();
+      return [
+        'ok' => true,
+        'last_snap' => (int) get_option('tdrt_last_snap', 0),
+        'last_count' => (int) get_option('tdrt_last_count', 0),
+        'now' => time(),
+      ];
+    },
+  ]);
+});
+
+// REST: /tdr-today/v1/greetings — accepts {tdl:[{name,wait_min,status,location}], tds:[...]}
+// fetcher.py が /tdl/realtime/greeting.html / /tds/realtime/greeting.html を Playwright で取得して POST する。
+// 保存先は option `tdrt_greet_tdl` / `tdrt_greet_tds`。tdrt_snapshot() がここから 15分毎にヒストリへ転記。
+add_action('rest_api_init', function(){
+  register_rest_route('tdr-today/v1', '/greetings', [
+    'methods' => 'POST',
+    'permission_callback' => function($req){
+      $token = (string) $req->get_header('x-tdr-token');
+      $expected = (string) get_option('tdr_mon_ingest_token', '');
+      return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+    },
+    'callback' => function($req){
+      $body = $req->get_json_params();
+      if(!is_array($body)) return new WP_Error('bad_json', 'expected JSON', ['status'=>400]);
+      $stored = [];
+      foreach(['tdl','tds'] as $park){
+        if(!isset($body[$park]) || !is_array($body[$park])) continue;
+        $clean = [];
+        foreach($body[$park] as $row){
+          if(!is_array($row) || empty($row['name'])) continue;
+          $clean[] = [
+            'name'     => (string)$row['name'],
+            'name_en'  => isset($row['name_en']) ? (string)$row['name_en'] : '',
+            'wait_min' => (isset($row['wait_min']) && $row['wait_min']!=='' && $row['wait_min']!==null) ? (int)$row['wait_min'] : null,
+            'status'   => isset($row['status']) ? (string)$row['status'] : 'operating',
+            'location' => isset($row['location']) ? (string)$row['location'] : '',
+            'character'=> isset($row['character']) ? (string)$row['character'] : '',
+          ];
+        }
+        $opt_key = 'tdrt_greet_'.$park;
+        $serialized = serialize($clean);
+        global $wpdb;
+        $existing = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $opt_key));
+        if($existing){
+          $wpdb->update($wpdb->options, ['option_value'=>$serialized,'autoload'=>'no'], ['option_name'=>$opt_key], ['%s','%s'], ['%s']);
+        } else {
+          $wpdb->insert($wpdb->options, ['option_name'=>$opt_key,'option_value'=>$serialized,'autoload'=>'no'], ['%s','%s','%s']);
+        }
+        wp_cache_delete($opt_key, 'options');
+        $stored[$park] = count($clean);
+      }
+      return ['ok'=>true, 'stored'=>$stored, 'now'=>time()];
+    },
+  ]);
+});
 
 // REST: /tdr-today/v1/shows — accepts {tdl:[{name,times,category}], tds:[...], date:Ymd}
 add_action('rest_api_init', function(){
