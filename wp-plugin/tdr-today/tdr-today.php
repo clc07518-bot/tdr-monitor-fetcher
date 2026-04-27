@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.3.6
+Version: 1.3.7
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -51,7 +51,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.3.6'){tdrt_install();update_option('tdrt_v','1.3.6',false);}
+  if(get_option('tdrt_v','0')!=='1.3.7'){tdrt_install();update_option('tdrt_v','1.3.7',false);}
 });
 
 // DWR plugin の名称が公式表記と微妙にズレているのを補正するマップ。
@@ -376,13 +376,16 @@ function tdrt_get_shows($park){
 }
 
 // 優先順位:
-//   1. tdrt_waits_<park> (我々が /realtime endpoint で取得・60分以内のもの) ← DWR が止まっても動く
+//   1. tdrt_waits_<park> (我々が /realtime endpoint で取得・4時間以内のもの) ← DWR が止まっても動く
+//      freshness window が 60分→4時間 (14400s) に拡張された (v1.3.7)。理由：GitHub Actions
+//      の schedule が free-tier で実態 ~2時間遅延するケースがあり、60分だと毎回 stale 判定
+//      で死んだ dwr_latest_<park> にフォールバックしてヒートマップが frozen 値で固定化していた。
 //   2. dwr_latest_<park> (DWR plugin の出力)
 //   3. dwr_prev_<park>   (DWR の前回値)
 function tdrt_wait_data_raw($park){
   $own = get_option('tdrt_waits_'.$park, null);
   if(is_array($own) && isset($own['rows']) && isset($own['ts'])){
-    if((int)$own['ts'] > (time() - 3600) && is_array($own['rows']) && !empty($own['rows'])){
+    if((int)$own['ts'] > (time() - 14400) && is_array($own['rows']) && !empty($own['rows'])){
       foreach($own['rows'] as $r){
         if(($r['status'] ?? '') === 'operating' && isset($r['wait_min']) && $r['wait_min'] !== '' && $r['wait_min'] !== null){
           return $own['rows'];
