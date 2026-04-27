@@ -14,12 +14,10 @@ name: TDR Realtime Poll
 #   5分間隔が欲しい場合は cron を */5 に変更し、public repo 化 or GHA 課金を許容。
 on:
   schedule:
-    # monitor.yml が 0,30 に realtime も叩くので、こちらは 15,45 にずらして
-    # 結果的に 15分間隔 (発券終了時刻 ±7.5分粒度) のサンプリングを実現する。
-    # JST 8:00-21:00 = UTC 23:00-12:00 (跨日) / 13h × 2runs = 26runs/day = ~780min/月
-    # 既存: monitor(1440)+snapshot(960)+realtime(780) ≈ 3,180min/月（無料枠2,000を~1,200分超）
-    # 5分粒度が欲しい場合は下行を `*/5 * * * *` に変更（~$22/月課金）
-    - cron: '15,45 23,0,1,2,3,4,5,6,7,8,9,10,11 * * *'
+    # 5分粒度: パーク営業時間中 (JST 8-21 = UTC 23-12) のみ */5 で実行。
+    # 13h × 12runs/h × 1min/run = 156 runs/day ≈ 4,680min/月
+    # → 無料枠 2,000min/月 をオーバーするため public repo 化 or 課金許容前提。
+    - cron: '*/5 23,0,1,2,3,4,5,6,7,8,9,10,11 * * *'
   workflow_dispatch:
 
 concurrency:
