@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: TDR Today
-Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.3.7
+Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
+Version: 1.3.8
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -51,7 +51,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.3.7'){tdrt_install();update_option('tdrt_v','1.3.7',false);}
+  if(get_option('tdrt_v','0')!=='1.3.8'){tdrt_install();update_option('tdrt_v','1.3.8',false);}
 });
 
 // DWR plugin の名称が公式表記と微妙にズレているのを補正するマップ。
@@ -187,13 +187,198 @@ function tdrt_fix_name($n){
 
 add_filter('cron_schedules',function($s){
   if(!isset($s['tdrt_15min']))$s['tdrt_15min']=['interval'=>900,'display'=>'TDRT 15min'];
+  if(!isset($s['tdrt_5min']))$s['tdrt_5min']=['interval'=>300,'display'=>'TDRT 5min'];
   return $s;
 });
 add_action('init',function(){
   if(!wp_next_scheduled('tdrt_snapshot'))wp_schedule_event(time()+30,'tdrt_15min','tdrt_snapshot');
+  // Queue-Times 5分間隔 poller (v1.3.8〜)。GHA throttle 非依存で待ち時間データを最新化する。
+  if(!wp_next_scheduled('tdrt_qt_refresh'))wp_schedule_event(time()+15,'tdrt_5min','tdrt_qt_refresh');
 });
+add_action('tdrt_qt_refresh','tdrt_queuetimes_fetch_all');
 register_deactivation_hook(__FILE__,function(){
   $t=wp_next_scheduled('tdrt_snapshot');if($t)wp_unschedule_event($t,'tdrt_snapshot');
+  $t2=wp_next_scheduled('tdrt_qt_refresh');if($t2)wp_unschedule_event($t2,'tdrt_qt_refresh');
+});
+
+// ── Queue-Times 統合 (v1.3.8) ─────────────────────────────────────
+// queue-times.com 公開APIから5分粒度で待ち時間を取得し tdrt_waits_<park> を更新。
+// GHA cron が throttle されても影響を受けない（純粋な HTTP fetch）。
+// DPA/PP/SBP バッジ情報は提供されないので、それらは引き続き fetcher.py 経由 (/realtime endpoint)。
+// ID→日本語名マップで照合するため、英名表記揺れに強い。
+function tdrt_queuetimes_id_map(){
+  return [
+    // ── TDL (park id 274) ──
+    7985 => 'オムニバス',
+    7986 => 'カリブの海賊',
+    7987 => 'ジャングルクルーズ：ワイルドライフ・エクスペディション',
+    7988 => 'ウエスタンリバー鉄道',
+    7989 => 'スイスファミリー・ツリーハウス',
+    7990 => '魅惑のチキルーム：スティッチ・プレゼンツ“アロハ・エ・コモ・マイ！”',
+    7991 => 'ウエスタンランド・シューティングギャラリー',
+    7992 => 'カントリーベア・シアター',
+    7993 => '蒸気船マークトウェイン号',
+    7994 => 'ビッグサンダー・マウンテン',
+    7995 => 'トムソーヤ島いかだ',
+    7996 => 'スプラッシュ・マウンテン',
+    7997 => 'ビーバーブラザーズのカヌー探険',
+    7998 => 'ピーターパン空の旅',
+    7999 => '白雪姫と七人のこびと',
+    8000 => 'シンデレラのフェアリーテイル・ホール',
+    8001 => 'ミッキーのフィルハーマジック',
+    8002 => 'ピノキオの冒険旅行',
+    8003 => '空飛ぶダンボ',
+    8004 => 'キャッスルカルーセル',
+    8005 => 'ホーンテッドマンション',
+    8006 => 'イッツ・ア・スモールワールド',
+    8007 => 'アリスのティーパーティー',
+    8008 => 'プーさんのハニーハント',
+    8009 => 'ロジャーラビットのカートゥーンスピン',
+    8010 => 'ミニーの家',
+    8011 => 'チップとデールのツリーハウス',
+    8012 => 'ガジェットのゴーコースター',
+    8013 => 'ドナルドのボート',
+    8014 => 'グーフィーのペイント＆プレイハウス',
+    8015 => 'スター・ツアーズ：ザ・アドベンチャーズ・コンティニュー',
+    8018 => 'モンスターズ・インク“ライド＆ゴーシーク！”',
+    8019 => 'ペニーアーケード',
+    8020 => 'トゥーンパーク',
+    8021 => 'スティッチ・エンカウンター',
+    8254 => 'ベイマックスのハッピーライド',
+    8255 => '美女と野獣“魔法のものがたり”',
+    // ── TDS (park id 275) ──
+    8022 => 'アリエルのプレイグラウンド',
+    8023 => 'トイ・ストーリー・マニア！',
+    8024 => 'ソアリン：ファンタスティック・フライト',
+    8025 => 'ジャスミンのフライングカーペット',
+    8026 => 'マーメイドラグーンシアター',
+    8027 => 'インディ・ジョーンズ®・アドベンチャー：クリスタルスカルの魔宮',
+    8028 => 'センター・オブ・ジ・アース',
+    8029 => '海底2万マイル',
+    8030 => 'マジックランプシアター',
+    // 8031-8033 (Steamer Line) と 8035-8036 (Electric Railway) は同一アトラクションの別駅 → 重複は dedupe
+    8031 => 'ディズニーシー・トランジットスチーマーライン',
+    8032 => 'ディズニーシー・トランジットスチーマーライン',
+    8033 => 'ディズニーシー・トランジットスチーマーライン',
+    8034 => 'ヴェネツィアン・ゴンドラ',
+    8035 => 'ディズニーシー・エレクトリックレールウェイ',
+    8036 => 'ディズニーシー・エレクトリックレールウェイ',
+    8037 => 'ビッグシティ・ヴィークル',
+    8038 => 'アクアトピア',
+    8039 => 'シンドバッド・ストーリーブック・ヴォヤッジ',
+    8040 => 'キャラバンカルーセル',
+    8041 => 'フランダーのフライングフィッシュコースター',
+    8042 => 'スカットルのスクーター',
+    8043 => 'ジャンピン・ジェリーフィッシュ',
+    8044 => 'ブローフィッシュ・バルーンレース',
+    8045 => 'ワールプール',
+    8046 => 'レイジングスピリッツ',
+    8047 => 'タワー・オブ・テラー',
+    8048 => 'フォートレス・エクスプロレーション',
+    8049 => 'フォートレス・エクスプロレーション“ザ・レオナルドチャレンジ”',
+    8050 => 'タートル・トーク',
+    8051 => 'ニモ＆フレンズ・シーライダー',
+    13559 => 'アナとエルサのフローズンジャーニー',
+    13560 => 'ラプンツェルのランタンフェスティバル',
+    13561 => 'ピーターパンのネバーランドアドベンチャー',
+    13562 => 'フェアリー・ティンカーベルのビジーバギー',
+  ];
+}
+
+function tdrt_queuetimes_fetch_all(){
+  $tdl = tdrt_fetch_queuetimes('tdl');
+  $tds = tdrt_fetch_queuetimes('tds');
+  update_option('tdrt_qt_last', ['tdl'=>$tdl, 'tds'=>$tds, 'ts'=>time()], false);
+}
+
+function tdrt_fetch_queuetimes($park){
+  $park_id = ($park === 'tdl') ? 274 : 275;
+  $url = "https://queue-times.com/parks/{$park_id}/queue_times.json";
+  $r = wp_remote_get($url, ['timeout' => 10, 'user-agent' => 'TDR-Today-Plugin/1.3.8']);
+  if(is_wp_error($r)) return ['error' => $r->get_error_message()];
+  $code = wp_remote_retrieve_response_code($r);
+  if($code !== 200) return ['error' => "HTTP {$code}"];
+  $body = wp_remote_retrieve_body($r);
+  $d = json_decode($body, true);
+  if(!is_array($d)) return ['error' => 'json parse'];
+  // rides は top-level または lands[].rides にある
+  $rides = $d['rides'] ?? [];
+  if(!empty($d['lands']) && is_array($d['lands'])){
+    foreach($d['lands'] as $land){
+      if(is_array($land) && !empty($land['rides'])){
+        foreach($land['rides'] as $ride) $rides[] = $ride;
+      }
+    }
+  }
+  if(empty($rides)) return ['error' => 'no rides'];
+
+  $id_map = tdrt_queuetimes_id_map();
+  $rows = [];
+  $by_name = []; // 重複 dedupe (Steamer Line など同名複数駅)
+  $unmapped = [];
+  foreach($rides as $ride){
+    $rid = (int)($ride['id'] ?? 0);
+    if(!isset($id_map[$rid])){
+      $unmapped[] = ['id' => $rid, 'name' => $ride['name'] ?? ''];
+      continue;
+    }
+    $jp = $id_map[$rid];
+    $is_open = !empty($ride['is_open']);
+    $wait = isset($ride['wait_time']) ? (int)$ride['wait_time'] : null;
+    if(!$is_open) $wait = null;  // 閉鎖中は wait を null に
+    if(isset($by_name[$jp])){
+      // 既に同名あり → wait の最大値を採用 (運行中の駅優先)
+      $existing = &$by_name[$jp];
+      if($existing['wait_min'] === null && $wait !== null) $existing['wait_min'] = $wait;
+      elseif($wait !== null && $existing['wait_min'] !== null && $wait > $existing['wait_min']) $existing['wait_min'] = $wait;
+      if($is_open) $existing['status'] = 'operating';
+      unset($existing);
+      continue;
+    }
+    $by_name[$jp] = [
+      'name' => $jp,
+      'wait_min' => $wait,
+      'status' => $is_open ? 'operating' : 'closed',
+    ];
+  }
+  $rows = array_values($by_name);
+  if(empty($rows)) return ['error' => 'no mapped rides', 'unmapped_count' => count($unmapped)];
+
+  // tdrt_waits_<park> に保存
+  $payload = serialize(['rows' => $rows, 'ts' => time(), 'source' => 'queue-times']);
+  $key = 'tdrt_waits_'.$park;
+  global $wpdb;
+  $existing_id = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $key));
+  if($existing_id){
+    $wpdb->update($wpdb->options, ['option_value'=>$payload, 'autoload'=>'no'], ['option_name'=>$key], ['%s','%s'], ['%s']);
+  } else {
+    $wpdb->insert($wpdb->options, ['option_name'=>$key, 'option_value'=>$payload, 'autoload'=>'no'], ['%s','%s','%s']);
+  }
+  wp_cache_delete($key, 'options');
+  return [
+    'park' => $park,
+    'count' => count($rows),
+    'unmapped' => count($unmapped),
+    'unmapped_sample' => array_slice($unmapped, 0, 3),
+  ];
+}
+
+// REST: /tdr-today/v1/qt-refresh — 外部cron (cron-job.org など) からも叩ける手動 trigger
+add_action('rest_api_init', function(){
+  register_rest_route('tdr-today/v1', '/qt-refresh', [
+    'methods' => ['GET','POST'],
+    'permission_callback' => function($req){
+      $token = (string) $req->get_header('x-tdr-token');
+      $expected = (string) get_option('tdr_mon_ingest_token', '');
+      // GET ならトークン任意（cron-job.org などからの単純呼び出し許可）
+      if($req->get_method() === 'GET') return true;
+      return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+    },
+    'callback' => function($req){
+      tdrt_queuetimes_fetch_all();
+      return get_option('tdrt_qt_last', []);
+    },
+  ]);
 });
 
 function tdrt_slot($ts=null){
