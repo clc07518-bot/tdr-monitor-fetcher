@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.3.8
+Version: 1.3.9
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -51,7 +51,7 @@ function tdrt_install(){
 }
 register_activation_hook(__FILE__,'tdrt_install');
 add_action('plugins_loaded',function(){
-  if(get_option('tdrt_v','0')!=='1.3.8'){tdrt_install();update_option('tdrt_v','1.3.8',false);}
+  if(get_option('tdrt_v','0')!=='1.3.9'){tdrt_install();update_option('tdrt_v','1.3.9',false);}
 });
 
 // DWR plugin の名称が公式表記と微妙にズレているのを補正するマップ。
@@ -363,16 +363,19 @@ function tdrt_fetch_queuetimes($park){
   ];
 }
 
-// REST: /tdr-today/v1/qt-refresh — 外部cron (cron-job.org など) からも叩ける手動 trigger
+// REST: /tdr-today/v1/qt-refresh — 外部cron (cron-job.org など) からの手動 trigger
+// v1.3.9: GET/POST 共に X-TDR-Token 必須に変更（public repo 環境での DoS 加担防止）。
+// cron-job.org 側で「Custom HTTP headers」に `X-TDR-Token: <token>` を設定すれば動く。
+// または query 引数 ?token=<token> でも認証可（一部 cron サービス header 非対応のため）。
 add_action('rest_api_init', function(){
   register_rest_route('tdr-today/v1', '/qt-refresh', [
     'methods' => ['GET','POST'],
     'permission_callback' => function($req){
-      $token = (string) $req->get_header('x-tdr-token');
       $expected = (string) get_option('tdr_mon_ingest_token', '');
-      // GET ならトークン任意（cron-job.org などからの単純呼び出し許可）
-      if($req->get_method() === 'GET') return true;
-      return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+      if($expected === '') return false;
+      $token = (string) $req->get_header('x-tdr-token');
+      if($token === '') $token = (string) $req->get_param('token');
+      return $token !== '' && hash_equals($expected, $token);
     },
     'callback' => function($req){
       tdrt_queuetimes_fetch_all();
