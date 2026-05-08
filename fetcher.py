@@ -510,30 +510,55 @@ def parse_ticket_price(html: str) -> dict[str, Any] | None:
 
     Returns: {"adult": 9900, "junior": 7400, "child": 4800, "note": "..."}
     or None if no ticket prices were found.
+
+    Two layouts seen in the wild:
+      A) "大人 18才以上 ¥9,900 / 中人 ¥7,400 / 小人 ¥4,800"
+         (label before price — used on the ticket purchase pages)
+      B) "￥10,900 ※1デーパスポート（大人）料金です"
+         (price before label — used on the daily calendar page in 2026-05)
+
+    Layout B only includes the adult price; junior/child are not surfaced on
+    the daily page. We accept partial output (adult-only is still useful) and
+    only return None if nothing parseable is found.
     """
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(" ", strip=True)
     import re as _re
     out: dict[str, Any] = {}
-    # Public daily pages show prices like:
-    #   大人 18才以上 ¥9,900 / 中人 中学・高校生 ¥7,400 / 小人 4才～小学生 ¥4,800
-    # The lookahead window must skip the human-readable age qualifier before the price.
-    patterns = {
-        "adult":  r"大人[^¥\d]*[¥￥]([\d,]+)",
-        "junior": r"中人[^¥\d]*[¥￥]([\d,]+)",
-        "child":  r"小人[^¥\d]*[¥￥]([\d,]+)",
-    }
-    for k, pat in patterns.items():
-        m = _re.search(pat, text)
-        if not m:
-            continue
+
+    def _record(key: str, raw: str) -> None:
+        if key in out:
+            return
         try:
-            v = int(m.group(1).replace(",", ""))
-            if 100 <= v <= 100000:  # plausibility: a 1-day passport fits in this range
-                out[k] = v
+            v = int(raw.replace(",", ""))
         except ValueError:
-            pass
-    return out if len(out) >= 2 else None
+            return
+        if 100 <= v <= 100000:  # 1-day passport plausibility
+            out[key] = v
+
+    # Pattern A: 大人 18才以上 ¥9,900 (label first, then price)
+    # Negative lookahead prevents crossing into the next category's section.
+    patterns_after = {
+        "adult":  r"大人(?:(?!中人|小人).){0,80}?[¥￥]([\d,]+)",
+        "junior": r"中人(?:(?!大人|小人).){0,80}?[¥￥]([\d,]+)",
+        "child":  r"小人(?:(?!大人|中人).){0,80}?[¥￥]([\d,]+)",
+    }
+    for k, pat in patterns_after.items():
+        m = _re.search(pat, text, _re.DOTALL)
+        if m:
+            _record(k, m.group(1))
+    # Pattern B: ￥10,900 ※1デーパスポート（大人）料金です (price first, then label)
+    # Same negative lookahead so the price doesn't leak from another category.
+    patterns_before = {
+        "adult":  r"[¥￥]([\d,]+)(?:(?![¥￥]|中人|小人).){0,80}?大人",
+        "junior": r"[¥￥]([\d,]+)(?:(?![¥￥]|大人|小人).){0,80}?中人",
+        "child":  r"[¥￥]([\d,]+)(?:(?![¥￥]|大人|中人).){0,80}?小人",
+    }
+    for k, pat in patterns_before.items():
+        m = _re.search(pat, text, _re.DOTALL)
+        if m:
+            _record(k, m.group(1))
+    return out or None
 
 
 def parse_show_schedule(html: str) -> list[dict]:
