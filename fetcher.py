@@ -82,6 +82,7 @@ SHOW_SCHEDULE_URLS = {
     "tds": "https://www.tokyodisneyresort.jp/tds/daily/calendar.html",
 }
 SHOWS_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/shows" if WP_BASE else ""
+TICKET_PRICE_INGEST = f"{WP_BASE}/wp-json/tdr-today/v1/ticket-price" if WP_BASE else ""
 
 # Character greeting realtime wait times (per-park).
 # 公式 HTML には現在ほぼデータが無い。/_/realtime/<park>_greeting.json を XHR で取る。
@@ -504,6 +505,37 @@ def parse_park_calendar(html: str) -> dict[str, dict[str, str]]:
     return result
 
 
+def parse_ticket_price(html: str) -> dict[str, Any] | None:
+    """Parse /{tdl|tds}/daily/calendar/<YYYYMMDD>/ for today's 1-day passport prices.
+
+    Returns: {"adult": 9900, "junior": 7400, "child": 4800, "note": "..."}
+    or None if no ticket prices were found.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    import re as _re
+    out: dict[str, Any] = {}
+    # Public daily pages show prices like:
+    #   大人 18才以上 ¥9,900 / 中人 中学・高校生 ¥7,400 / 小人 4才～小学生 ¥4,800
+    # The lookahead window must skip the human-readable age qualifier before the price.
+    patterns = {
+        "adult":  r"大人[^¥\d]*[¥￥]([\d,]+)",
+        "junior": r"中人[^¥\d]*[¥￥]([\d,]+)",
+        "child":  r"小人[^¥\d]*[¥￥]([\d,]+)",
+    }
+    for k, pat in patterns.items():
+        m = _re.search(pat, text)
+        if not m:
+            continue
+        try:
+            v = int(m.group(1).replace(",", ""))
+            if 100 <= v <= 100000:  # plausibility: a 1-day passport fits in this range
+                out[k] = v
+        except ValueError:
+            pass
+    return out if len(out) >= 2 else None
+
+
 def parse_show_schedule(html: str) -> list[dict]:
     """Parse /{tdl|tds}/daily/calendar.html for today's show/parade times.
 
@@ -776,6 +808,26 @@ def ingest_show_schedule(per_park: dict[str, list[dict]]) -> dict[str, Any]:
     return {"endpoint": "shows", "status": r.status_code, **body}
 
 
+def ingest_ticket_price(per_park: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Send today's per-park 1-day passport prices to /tdr-today/v1/ticket-price."""
+    if not per_park or not any(per_park.values()):
+        return {"endpoint": "ticket-price", "skipped": "no prices parsed"}
+    if DRY_RUN:
+        return {"endpoint": "ticket-price", "dry_run": True, "data": per_park}
+    payload = {**per_park, "date": time.strftime("%Y%m%d", time.localtime())}
+    r = requests.post(
+        TICKET_PRICE_INGEST,
+        headers={"X-TDR-Token": TOKEN, "Content-Type": "application/json"},
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        timeout=15,
+    )
+    try:
+        body = r.json()
+    except Exception:
+        body = {"raw": r.text[:300]}
+    return {"endpoint": "ticket-price", "status": r.status_code, **body}
+
+
 def ingest_park_hours(hours: dict[str, dict[str, str]]) -> dict[str, Any]:
     if not hours:
         return {"endpoint": "park-hours", "skipped": "no hours parsed"}
@@ -893,13 +945,21 @@ def main() -> int:
             except Exception as e:
                 summary["park_hours"] = {"error": f"parse: {e}"}
 
-        # Show / parade schedules per park
+        # Show / parade schedules per park (and reuse the daily HTML for ticket prices below)
         shows: dict[str, list[dict]] = {}
+        ticket_prices: dict[str, dict[str, Any]] = {}
         for park, url in SHOW_SCHEDULE_URLS.items():
             try:
                 html_show = render_with_retry(page, url, ".linkList33")
                 shows[park] = parse_show_schedule(html_show)
                 print(f"[parse] shows {park}: {len(shows[park])} items", file=sys.stderr)
+                # Reuse the same HTML to extract today's 1-day passport prices.
+                tp = parse_ticket_price(html_show)
+                if tp:
+                    ticket_prices[park] = tp
+                    print(f"[parse] ticket {park}: {tp}", file=sys.stderr)
+                else:
+                    print(f"[warn] ticket {park}: no prices parsed", file=sys.stderr)
             except Exception as e:
                 print(f"[warn] shows {park}: {e}", file=sys.stderr)
                 shows[park] = []
@@ -907,6 +967,10 @@ def main() -> int:
             summary["shows"] = ingest_show_schedule(shows)
         except Exception as e:
             summary["shows"] = {"error": f"ingest: {e}"}
+        try:
+            summary["ticket_price"] = ingest_ticket_price(ticket_prices)
+        except Exception as e:
+            summary["ticket_price"] = {"error": f"ingest: {e}"}
 
         # Character greetings: 公式 JSON API (/_/realtime/<park>_greeting.json) を叩く。
         # HTML 版は待ち時間を埋め込まなくなったため使用不可（2026-04-27 確認）。

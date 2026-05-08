@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: TDR Today
-Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.3.9
+Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling + チケット価格表示。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
+Version: 1.4.0
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -563,6 +563,16 @@ function tdrt_get_shows($park){
   return isset($stored[$park]) && is_array($stored[$park]) ? $stored[$park] : [];
 }
 
+// Today's official 1-day passport price (per park, per ticket category).
+// Stored as: ['tdl'=>['adult'=>9900,'junior'=>8400,'child'=>5900], 'tds'=>[...]]
+// Populated by fetcher.py via /wp-json/tdr-today/v1/ticket-price.
+function tdrt_get_ticket_price($park){
+  $today_ymd = wp_date('Ymd');
+  $stored = get_option('tdrt_ticket_price_'.$today_ymd, null);
+  if(!is_array($stored)) return null;
+  return isset($stored[$park]) && is_array($stored[$park]) ? $stored[$park] : null;
+}
+
 // 優先順位:
 //   1. tdrt_waits_<park> (我々が /realtime endpoint で取得・4時間以内のもの) ← DWR が止まっても動く
 //      freshness window が 60分→4時間 (14400s) に拡張された (v1.3.7)。理由：GitHub Actions
@@ -773,6 +783,30 @@ foreach($shows as $sh):
 <?php endforeach; ?>
 </ul>
 <?php endif; ?>
+
+<?php $tp=tdrt_get_ticket_price($park); if($tp): ?>
+<h3>💴 今日のチケット価格 (1デーパスポート)</h3>
+<table style="width:100%;border-collapse:collapse;font-size:13px;background:#fff;margin:8px 0">
+<thead><tr style="background:#f0f0f1"><th style="padding:8px;border:1px solid #e0e0e0;text-align:left">区分</th><th style="padding:8px;border:1px solid #e0e0e0;text-align:right">通常料金</th></tr></thead>
+<tbody>
+<?php
+$labels = ['adult'=>'大人 (18才以上)', 'junior'=>'中人 (中学・高校生)', 'child'=>'小人 (4才〜小学生)'];
+foreach($labels as $k=>$lbl): if(!isset($tp[$k])) continue; ?>
+<tr><td style="padding:8px;border:1px solid #e0e0e0"><?php echo esc_html($lbl);?></td><td style="padding:8px;border:1px solid #e0e0e0;text-align:right;font-weight:700;color:<?php echo $pc;?>">¥<?php echo number_format((int)$tp[$k]);?></td></tr>
+<?php endforeach; ?>
+</tbody>
+</table>
+<?php if(!empty($tp['note'])): ?>
+<p style="font-size:11px;color:#888;margin:4px 0 12px"><?php echo esc_html($tp['note']);?></p>
+<?php else: ?>
+<p style="font-size:11px;color:#888;margin:4px 0 12px">※ 公式運営カレンダーから自動取得。日付料金制で変動します。</p>
+<?php endif; ?>
+<?php endif; ?>
+
+<?php
+// 🎫 DPA/プライオリティパス発券状況 を hub 内に統合表示
+echo do_shortcode('[tdr_pass_today park="'.$park.'"]');
+?>
 
 <div class="cta">
 <a class="cp" href="<?php echo home_url('/calendar/');?>">📅 混雑予想</a>
@@ -1399,6 +1433,79 @@ add_action('rest_api_init', function(){
       $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'tdrt_park_hours_%' AND SUBSTRING(option_name, 17, 8) < %s", $cutoff));
       delete_transient('tdrt_cal');
       return ['ok' => true, 'date' => $date, 'stored' => $out];
+    },
+  ]);
+});
+
+// REST: /tdr-today/v1/ticket-price — accepts {date:Ymd, tdl:{adult,junior,child,note}, tds:{...}}
+// Used by fetcher.py to populate today's official 1-day passport prices per park.
+add_action('rest_api_init', function(){
+  register_rest_route('tdr-today/v1', '/ticket-price', [
+    'methods' => 'POST',
+    'permission_callback' => function($req){
+      $token = (string) $req->get_header('x-tdr-token');
+      $expected = (string) get_option('tdr_mon_ingest_token', '');
+      return $token !== '' && $expected !== '' && hash_equals($expected, $token);
+    },
+    'callback' => function($req){
+      $body = $req->get_json_params();
+      if(!is_array($body)) return new WP_Error('bad_json', 'expected JSON', ['status'=>400]);
+      $date = isset($body['date']) ? preg_replace('/[^0-9]/', '', (string)$body['date']) : wp_date('Ymd');
+      if(strlen($date) !== 8) return new WP_Error('bad_date', 'date must be Ymd', ['status'=>400]);
+      $out = [];
+      foreach(['tdl','tds'] as $park){
+        if(isset($body[$park]) && is_array($body[$park])){
+          $row = [];
+          foreach(['adult','junior','child'] as $k){
+            if(isset($body[$park][$k]) && is_numeric($body[$park][$k])) $row[$k] = (int)$body[$park][$k];
+          }
+          if(isset($body[$park]['note'])) $row['note'] = (string)$body[$park]['note'];
+          if(!empty($row)) $out[$park] = $row;
+        }
+      }
+      if(empty($out)) return new WP_Error('empty', 'no ticket prices provided', ['status'=>400]);
+      $opt_key = 'tdrt_ticket_price_'.$date;
+      $serialized = serialize($out);
+      global $wpdb;
+      $existing = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $opt_key));
+      if($existing){
+        $wpdb->update($wpdb->options, ['option_value'=>$serialized,'autoload'=>'no'], ['option_name'=>$opt_key], ['%s','%s'], ['%s']);
+      } else {
+        $wpdb->insert($wpdb->options, ['option_name'=>$opt_key,'option_value'=>$serialized,'autoload'=>'no'], ['%s','%s','%s']);
+      }
+      wp_cache_delete($opt_key, 'options');
+      $cutoff = wp_date('Ymd', time() - 7*DAY_IN_SECONDS);
+      $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'tdrt_ticket_price_%' AND SUBSTRING(option_name, 19, 8) < %s", $cutoff));
+      return ['ok' => true, 'date' => $date, 'stored' => $out];
+    },
+  ]);
+});
+
+// REST: /tdr-today/v1/debug-state — admin only. Reveals current option keys for diagnosing
+// missing displays (e.g. shows / park hours / ticket prices not appearing on /today-tdl/).
+add_action('rest_api_init', function(){
+  register_rest_route('tdr-today/v1', '/debug-state', [
+    'methods' => 'GET',
+    'permission_callback' => function(){ return current_user_can('manage_options'); },
+    'callback' => function(){
+      $today_ymd = wp_date('Ymd');
+      global $wpdb;
+      $patterns = ['tdrt_shows_%', 'tdrt_park_hours_%', 'tdrt_ticket_price_%'];
+      $found = [];
+      foreach($patterns as $pat){
+        $rows = $wpdb->get_results($wpdb->prepare(
+          "SELECT option_name, LENGTH(option_value) AS len FROM {$wpdb->options} WHERE option_name LIKE %s ORDER BY option_name DESC LIMIT 10",
+          $pat));
+        $found[$pat] = array_map(fn($r) => ['name'=>$r->option_name, 'bytes'=>(int)$r->len], $rows);
+      }
+      return [
+        'today' => $today_ymd,
+        'now' => wp_date('Y-m-d H:i:s'),
+        'options' => $found,
+        'shows_today' => get_option('tdrt_shows_'.$today_ymd, []),
+        'hours_today' => get_option('tdrt_park_hours_'.$today_ymd, []),
+        'ticket_today' => get_option('tdrt_ticket_price_'.$today_ymd, []),
+      ];
     },
   ]);
 });
