@@ -848,23 +848,34 @@ def ingest_park_hours(hours: dict[str, dict[str, str]]) -> dict[str, Any]:
 
 
 def ingest(source: str, items: list[dict]) -> dict[str, Any]:
+    """POST a batch of news/stop items to /wp-json/tdr-mon/v1/ingest.
+
+    The WP plugin scans wp_options for tdr_mon_item_* on every insert to
+    de-duplicate against existing items, which gets slow when thousands of
+    items have accumulated. We retry once with a longer timeout before giving
+    up so a slow-but-eventually-successful save doesn't tank the whole run.
+    """
     if not items:
         return {"source": source, "received": 0, "new": 0, "skipped": True}
     if DRY_RUN:
         return {"source": source, "dry_run": True, "count": len(items),
                 "first_title": items[0].get("title", "")[:80]}
     payload = {"source": source, "items": items}
-    r = requests.post(
-        INGEST,
-        headers={"X-TDR-Token": TOKEN, "Content-Type": "application/json"},
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        timeout=30,
-    )
-    try:
-        body = r.json()
-    except Exception:
-        body = {"raw": r.text[:500]}
-    return {"source": source, "status": r.status_code, **body}
+    body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"X-TDR-Token": TOKEN, "Content-Type": "application/json"}
+    last_err: Exception | None = None
+    for attempt, timeout_s in enumerate((90, 120), start=1):
+        try:
+            r = requests.post(INGEST, headers=headers, data=body_bytes, timeout=timeout_s)
+            try:
+                body = r.json()
+            except Exception:
+                body = {"raw": r.text[:500]}
+            return {"source": source, "status": r.status_code, "attempt": attempt, **body}
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            last_err = e
+            print(f"[ingest] {source} attempt {attempt} timed out ({timeout_s}s); retrying", file=sys.stderr)
+    return {"source": source, "error": f"timeout: {last_err}"}
 
 
 def main() -> int:
