@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling + チケット価格表示。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.4.0
+Version: 1.4.1
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -804,8 +804,18 @@ foreach($labels as $k=>$lbl): if(!isset($tp[$k])) continue; ?>
 <?php endif; ?>
 
 <?php
-// 🎫 DPA/プライオリティパス発券状況 を hub 内に統合表示
-echo do_shortcode('[tdr_pass_today park="'.$park.'"]');
+// 🎫 DPA/プライオリティパス発券状況 を hub 内に統合表示。
+// 営業時間外は has_dpa/has_pp フラグが「対応アトラクションかどうか」の static
+// マーカーとして残ってしまい、本来発券していない時間帯でも「発券中」と誤表示
+// するため、open かつ event_time が今日のものだけ表示する。
+if($is_open){
+  echo do_shortcode('[tdr_pass_today park="'.$park.'"]');
+} else {
+?>
+<h3>🎫 <?php echo esc_html($pl);?> パス発券状況</h3>
+<p style="color:#888;text-align:center;padding:16px;background:#f8f8f8;border-radius:8px;font-size:13px">🌙 現在パークは営業時間外です。<br>明日の開園後にDPA・プライオリティパスの発券状況をリアルタイム表示します。</p>
+<?php
+}
 ?>
 
 <div class="cta">
