@@ -885,8 +885,9 @@ function tdrt_pass_today($a){
     $by_attr[$aid]['name'] = tdrt_fix_name($r->attr_name);
     $by_attr[$aid][$r->pass_type][$r->event] = $r->event_time;
   }
-  // 現在の状態
-  $current = get_option('tdrt_realtime_'.$park, []);
+  // 現在の状態（営業時間外は古い値を「発券中」と誤認させないため空に倒す）
+  $is_open = tdrt_is_open($park);
+  $current = $is_open ? get_option('tdrt_realtime_'.$park, []) : [];
   if(!is_array($current)) $current = [];
   $cur_idx = [];
   foreach($current as $c){ if(isset($c['name'])) $cur_idx[$c['name']] = $c; }
@@ -917,6 +918,9 @@ function tdrt_pass_today($a){
   <span class="pass" style="background:#0d6efd">PP</span>プライオリティパス（無料）
   <span class="pass" style="background:#198754">SP</span>スタンバイパス
 </div>
+<?php if(!$is_open): ?>
+<p style="color:#666;font-size:12px;text-align:center;padding:8px 12px;background:#f8f8f8;border-radius:6px;margin:8px 0">🌙 現在パークは営業時間外です。下記は本日の最終発券時刻（過去履歴）を表示しています。</p>
+<?php endif; ?>
 <?php if(empty($by_attr)): ?>
 <p class="none">本日のパス発券データはまだありません。<br><small>5〜30分間隔で自動収集中。</small></p>
 <?php else: ?>

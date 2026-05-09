@@ -425,14 +425,23 @@ def post_to_x(item: dict) -> dict:
 
     state = x_load_state()
     today_key = time.strftime("%Y%m%d", now)
-    today_count = state.get("by_date", {}).get(today_key, 0)
+    # Guard: WP-side state has historically returned "by_date" / "posted_ids"
+    # as either dict / list. Normalize both shapes so we never AttributeError
+    # on a list.get(...) call.
+    by_date = state.get("by_date", {})
+    if not isinstance(by_date, dict):
+        by_date = {}
+    today_count = by_date.get(today_key, 0)
     if today_count >= X_DAILY_LIMIT:
         return {"posted": False, "reason": f"daily_limit:{today_count}"}
 
     # 初回実行（posted_ids が空）は過去記事を一気にポストしないようシード扱い。
     # 呼び出し側で先に x_seed_if_first_run() するためここでは記録のみ。
     item_id = item.get("id", "")
-    if item_id and item_id in state.get("posted_ids", []):
+    posted_ids = state.get("posted_ids", [])
+    if not isinstance(posted_ids, list):
+        posted_ids = []
+    if item_id and item_id in posted_ids:
         return {"posted": False, "reason": "already_posted"}
 
     title = (item.get("title") or "").strip()
