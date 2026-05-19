@@ -544,7 +544,9 @@ def parse_full_ticket_prices(text: str) -> dict[str, dict[str, int]]:
             continue
         escaped = _re.escape(name)
         # Optional (期間限定) etc after name
-        pat = escaped + r"(?:[（(][^）)]{0,20}[）)])?\s*大人[：:]\s*[¥￥]([\d,]+)[^中]{0,40}中人[：:]\s*[¥￥]([\d,]+)[^小]{0,40}小人[：:]\s*[¥￥]([\d,]+)"
+        # _PRICE pattern: well-formed yen amount (no greedy bleed into next type name)
+        _price = r"([1-9]\d{0,2}(?:,\d{3})*|\d{3,5})"
+        pat = escaped + r"(?:[（(][^）)]{0,20}[）)])?\s*大人[：:]\s*[¥￥]" + _price + r"[^中]{0,40}中人[：:]\s*[¥￥]" + _price + r"[^小]{0,40}小人[：:]\s*[¥￥]" + _price
         m = _re.search(pat, text)
         if not m:
             continue
@@ -631,10 +633,13 @@ def parse_ticket_price(html: str) -> dict[str, Any] | None:
 
     # Pattern A: 大人 18才以上 ¥9,900 (label first, then price)
     # Negative lookahead prevents crossing into the next category's section.
+    # Price pattern enforces well-formed Japanese yen amount (no greedy concatenation
+    # of digits from the following type name, e.g. "￥5,6001デーパスポート" → ¥5,600).
+    _PRICE = r"([1-9]\d{0,2}(?:,\d{3})*|\d{3,5})"
     patterns_after = {
-        "adult":  r"大人(?:(?!中人|小人).){0,80}?[¥￥]([\d,]+)",
-        "junior": r"中人(?:(?!大人|小人).){0,80}?[¥￥]([\d,]+)",
-        "child":  r"小人(?:(?!大人|中人).){0,80}?[¥￥]([\d,]+)",
+        "adult":  r"大人(?:(?!中人|小人).){0,80}?[¥￥]" + _PRICE,
+        "junior": r"中人(?:(?!大人|小人).){0,80}?[¥￥]" + _PRICE,
+        "child":  r"小人(?:(?!大人|中人).){0,80}?[¥￥]" + _PRICE,
     }
     for k, pat in patterns_after.items():
         m = _re.search(pat, text, _re.DOTALL)
@@ -643,9 +648,9 @@ def parse_ticket_price(html: str) -> dict[str, Any] | None:
     # Pattern B: ￥10,900 ※1デーパスポート（大人）料金です (price first, then label)
     # Same negative lookahead so the price doesn't leak from another category.
     patterns_before = {
-        "adult":  r"[¥￥]([\d,]+)(?:(?![¥￥]|中人|小人).){0,80}?大人",
-        "junior": r"[¥￥]([\d,]+)(?:(?![¥￥]|大人|小人).){0,80}?中人",
-        "child":  r"[¥￥]([\d,]+)(?:(?![¥￥]|大人|中人).){0,80}?小人",
+        "adult":  r"[¥￥]" + _PRICE + r"(?:(?![¥￥]|中人|小人).){0,80}?大人",
+        "junior": r"[¥￥]" + _PRICE + r"(?:(?![¥￥]|大人|小人).){0,80}?中人",
+        "child":  r"[¥￥]" + _PRICE + r"(?:(?![¥￥]|大人|中人).){0,80}?小人",
     }
     for k, pat in patterns_before.items():
         m = _re.search(pat, text, _re.DOTALL)
