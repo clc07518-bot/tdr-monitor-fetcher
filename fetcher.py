@@ -514,6 +514,90 @@ def parse_park_calendar(html: str) -> dict[str, dict[str, str]]:
     return result
 
 
+TICKET_TYPE_MAP = {
+    "1デーパスポート（障がいのある方向け）": "shougai",
+    "1デーパークホッパーパスポート": "hopper",
+    "ファンダフル・ディズニー・パスポート": "fanfunful",
+    "首都圏ウィークデーパスポート": "shutoken",
+    "ウィークナイトパスポート／アフター5サマーパスポート": "weeknight",
+    "ウィークナイトパスポート": "weeknight",
+    "アフター5サマーパスポート": "weeknight",
+    "アーリーイブニングパスポート／アフター3サマーパスポート": "early_evening",
+    "アーリーイブニングパスポート": "early_evening",
+    "アフター3サマーパスポート": "early_evening",
+    "1デーパスポート": "general",
+}
+
+def parse_full_ticket_prices(text: str) -> dict[str, dict[str, int]]:
+    """Parse modal text into per-ticket-type prices (今日の全券種価格).
+
+    Modal text contains: <ticket_name>大人：￥X 中人：￥X 小人：￥X (per type, concatenated)
+    Long type names must be matched first (e.g. 1デーパスポート（障がいのある方向け） before 1デーパスポート).
+    Returns: {"general": {"adult": 9400, "junior": 7800, "child": 5600}, "shougai": {...}, ...}
+    """
+    import re as _re
+    result: dict[str, dict[str, int]] = {}
+    # Longest names first to avoid 1デーパスポート capturing 障がい者向け
+    for name in sorted(TICKET_TYPE_MAP.keys(), key=len, reverse=True):
+        key = TICKET_TYPE_MAP[name]
+        if key in result:
+            continue
+        escaped = _re.escape(name)
+        # Optional (期間限定) etc after name
+        pat = escaped + r"(?:[（(][^）)]{0,20}[）)])?\s*大人[：:]\s*[¥￥]([\d,]+)[^中]{0,40}中人[：:]\s*[¥￥]([\d,]+)[^小]{0,40}小人[：:]\s*[¥￥]([\d,]+)"
+        m = _re.search(pat, text)
+        if not m:
+            continue
+        try:
+            result[key] = {
+                "adult": int(m.group(1).replace(",", "")),
+                "junior": int(m.group(2).replace(",", "")),
+                "child": int(m.group(3).replace(",", "")),
+            }
+        except ValueError:
+            continue
+    return result
+
+
+def fetch_full_ticket_prices(page, park: str, today_ymd: str) -> dict[str, dict[str, int]] | None:
+    """Open the official ticket calendar, click today, parse modal for all ticket prices.
+
+    park: 'tdl' or 'tds'
+    today_ymd: 'YYYYMMDD' (Asia/Tokyo today)
+    Returns: same shape as parse_full_ticket_prices, or None if scraping failed.
+    """
+    yyyymm = today_ymd[:6]
+    url = f"https://www.tokyodisneyresort.jp/ticket/index/{yyyymm}/?park={park}"
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_selector(f'a[data-ymd="{today_ymd}"][data-park="{park}"]', timeout=15000)
+        page.click(f'a[data-ymd="{today_ymd}"][data-park="{park}"]')
+        # Wait for modal to populate (the inner text update is async)
+        page.wait_for_function(
+            f"""() => {{
+                const m = [...document.querySelectorAll('.modalContent_inner')].find(el => {{
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && el.textContent.includes('{today_ymd[:4]}年');
+                }});
+                return m && m.textContent.includes('大人');
+            }}""",
+            timeout=10000,
+        )
+        modal_text = page.evaluate(
+            """() => {
+                const m = [...document.querySelectorAll('.modalContent_inner')].find(el => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0;
+                });
+                return m ? m.textContent : '';
+            }"""
+        )
+        return parse_full_ticket_prices(modal_text) or None
+    except Exception as e:
+        print(f"[warn] fetch_full_ticket_prices {park}: {e}", file=sys.stderr)
+        return None
+
+
 def parse_ticket_price(html: str) -> dict[str, Any] | None:
     """Parse /{tdl|tds}/daily/calendar/<YYYYMMDD>/ for today's 1-day passport prices.
 
@@ -993,13 +1077,28 @@ def main() -> int:
         # Show / parade schedules per park (and reuse the daily HTML for ticket prices below)
         shows: dict[str, list[dict]] = {}
         ticket_prices: dict[str, dict[str, Any]] = {}
+        today_ymd_jst = time.strftime("%Y%m%d", time.localtime())
         for park, url in SHOW_SCHEDULE_URLS.items():
             try:
                 html_show = render_with_retry(page, url, ".linkList33")
                 shows[park] = parse_show_schedule(html_show)
                 print(f"[parse] shows {park}: {len(shows[park])} items", file=sys.stderr)
-                # Reuse the same HTML to extract today's 1-day passport prices.
-                tp = parse_ticket_price(html_show)
+                # Reuse the same HTML to extract today's 1-day passport prices (fallback).
+                tp = parse_ticket_price(html_show) or {}
+                # Fetch full per-type prices via the official ticket calendar modal.
+                try:
+                    full_prices = fetch_full_ticket_prices(page, park, today_ymd_jst)
+                    if full_prices:
+                        tp["types"] = full_prices
+                        # If general was extracted from modal, prefer it over the fallback.
+                        if "general" in full_prices:
+                            for cat in ("adult", "junior", "child"):
+                                if cat in full_prices["general"]:
+                                    tp[cat] = full_prices["general"][cat]
+                        print(f"[parse] ticket {park} types: {list(full_prices.keys())}",
+                              file=sys.stderr)
+                except Exception as e:
+                    print(f"[warn] full ticket prices {park}: {e}", file=sys.stderr)
                 if tp:
                     ticket_prices[park] = tp
                     print(f"[parse] ticket {park}: {tp}", file=sys.stderr)
