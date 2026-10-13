@@ -4,7 +4,7 @@ on:
   schedule:
     # 30-minute interval keeps monthly GHA usage within the 2,000-min free
     # tier for private repos (~1,440 min/month at ~1 min/run).
-    - cron: '*/30 * * * *'
+    - cron: '0,30 * * * *'
   workflow_dispatch:
     inputs:
       backfill:
@@ -33,6 +33,12 @@ jobs:
       - name: Install python deps
         run: pip install -r requirements.txt
 
+      - name: Validate closure synchronization
+        run: |
+          python -m unittest discover -s tests -p 'test_*.py'
+          php -l wp-plugin/tdr-today/tdr-today.php
+          php tests/test_closures.php
+
       - name: Setup Google Chrome
         uses: browser-actions/setup-chrome@v1
         with:
@@ -57,6 +63,8 @@ jobs:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
           PW_CHANNEL: chrome
+          # Restore park data without sending X posts during recovery.
+          X_AUTO_POST: '0'
           X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
           X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}

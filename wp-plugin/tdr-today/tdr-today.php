@@ -2,10 +2,17 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling + チケット価格表示。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.5.5
+Version: 1.5.11
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
+
+function tdrt_verified_from(){
+  $v=get_option('tdrt_verified_waits_from','');
+  if(!$v){$v=current_time('mysql');add_option('tdrt_verified_waits_from',$v,'','no');}
+  return $v;
+}
+add_action('init','tdrt_verified_from');
 
 function tdrt_table(){global $wpdb;return $wpdb->prefix.'tdr_wait_history';}
 function tdrt_pass_table(){global $wpdb;return $wpdb->prefix.'tdr_pass_events';}
@@ -59,6 +66,11 @@ add_action('plugins_loaded',function(){
 // 公式正式名称は curly double quote (U+201C / U+201D) を使う点に注意。
 // キーは DWR が保持している name(誤・略称・英名・straight quote 等)、値は公式の正式名称。
 function tdrt_fix_name($n){
+  $alias=[
+    "“it's a small world”"=>'イッツ・ア・スモールワールド',
+    'The Enchanted Tiki Room: Stitch Presents “Aloha E Komo Mai!”'=>'魅惑のチキルーム：スティッチ・プレゼンツ“アロハ・エ・コモ・マイ！”'
+  ];
+  if(isset($alias[$n]))return $alias[$n];
   static $map = null;
   if($map === null){
     $map = [
@@ -290,6 +302,9 @@ function tdrt_queuetimes_fetch_all(){
   $tdl = tdrt_fetch_queuetimes('tdl');
   $tds = tdrt_fetch_queuetimes('tds');
   update_option('tdrt_qt_last', ['tdl'=>$tdl, 'tds'=>$tds, 'ts'=>time()], false);
+  $greetings=[];foreach(['tdl','tds'] as $park)$greetings[$park]=tdrt_fetch_official_greetings($park);
+  update_option('tdrt_greet_fetch_last',$greetings,false);
+  tdrt_snapshot();
 }
 
 function tdrt_fetch_queuetimes($park){
@@ -323,6 +338,8 @@ function tdrt_fetch_queuetimes($park){
       $unmapped[] = ['id' => $rid, 'name' => $ride['name'] ?? ''];
       continue;
     }
+    $observed = isset($ride['last_updated']) ? strtotime($ride['last_updated']) : false;
+    if(!$observed || $observed > time()+60 || $observed < time()-1200)continue;
     $jp = $id_map[$rid];
     $is_open = !empty($ride['is_open']);
     $wait = isset($ride['wait_time']) ? (int)$ride['wait_time'] : null;
@@ -340,9 +357,11 @@ function tdrt_fetch_queuetimes($park){
       'name' => $jp,
       'wait_min' => $wait,
       'status' => $is_open ? 'operating' : 'closed',
+      'observed_ts' => $observed,
     ];
   }
-  $rows = array_values($by_name);
+  $previous=get_option('tdrt_waits_'.$park,[]);
+  $rows=tdrt_with_previous(array_values($by_name),is_array($previous)?($previous['rows']??[]):[],$park);
   if(empty($rows)) return ['error' => 'no mapped rides', 'unmapped_count' => count($unmapped)];
 
   // tdrt_waits_<park> に保存
@@ -392,7 +411,7 @@ function tdrt_slot($ts=null){
 }
 function tdrt_aid($en,$jp){return substr(md5($en!==''?$en:$jp),0,16);}
 
-function tdrt_snapshot(){
+function tdrt_snapshot($attractions_only=false){
   global $wpdb;$tbl=tdrt_table();$now=current_time('mysql');$slot=tdrt_slot();$n=0;
   // park='tdl'/'tds' は tdrt_wait_data_raw() の優先度判定（tdrt_waits → dwr_latest → dwr_prev）に乗せる。
   // park='tdl_g'/'tds_g' は キャラグリ専用 option。
@@ -403,26 +422,40 @@ function tdrt_snapshot(){
     'tds_g' => 'tdrt_greet_tds',
   ];
   foreach($sources as $park=>$opt_key){
+    if($attractions_only && $opt_key!==null)continue;
     $base_park = (substr($park,-2)==='_g') ? substr($park,0,3) : $park;
     if(!tdrt_is_open($base_park))continue; // 閉園中は記録しない
     if($opt_key === null){
       $rows = tdrt_wait_data_raw($base_park);
     } else {
-      $rows = get_option($opt_key,[]);
+      $rows = tdrt_greet_data($base_park);
     }
     if(!is_array($rows))continue;
     foreach($rows as $r){
       $name=isset($r['name'])?(string)$r['name']:'';
       $en=isset($r['name_en'])?(string)$r['name_en']:'';
       if($name===''&&$en==='')continue;
-      $aid=tdrt_aid($en,$name);
+      $name=tdrt_fix_name($name);
+      $aid=$opt_key===null?tdrt_aid('', $name):tdrt_aid($en,$name);
+      $recorded=$now; $record_slot=$slot;
+      {
+        $at=(int)($r['observed_ts']??($opt_key!==null?get_option('tdrt_greet_observed_'.$base_park,0):0));
+        if(!$at || wp_date('Y-m-d',$at)!==wp_date('Y-m-d'))continue;
+        $recorded=wp_date('Y-m-d H:i:s',$at);
+        if($recorded<tdrt_verified_from())continue;
+        $minute=(int)wp_date('i',$at)<30?'00':'30';
+        $record_slot=(int)(wp_date('YmdH',$at).$minute);
+      }
+      if(tdrt_t2m(substr($recorded,11,5))>=tdrt_history_close($base_park,substr($recorded,0,10)))continue;
       $name=tdrt_fix_name($name); // 公式表記へ正規化してから保存
       $w=(isset($r['wait_min'])&&$r['wait_min']!==''&&$r['wait_min']!==null)?(int)$r['wait_min']:null;
-      $st=isset($r['status'])?(string)$r['status']:'';
+      $st=$r['history_status']??($r['status']??'');
+      if(tdrt_is_history_stopped($name,tdrt_history_stops($base_park,substr($recorded,0,10))))$st='all_day_closed';
+      if($st!=='operating')$w=null;
       $cols='park,attr_id,attr_name,wait_min,status,recorded_at,slot_key';
       $ph=$w===null?'%s,%s,%s,NULL,%s,%s,%d':'%s,%s,%s,%d,%s,%s,%d';
-      $args=$w===null?[$park,$aid,$name?:$en,$st,$now,$slot]:[$park,$aid,$name?:$en,$w,$st,$now,$slot];
-      $wpdb->query($wpdb->prepare("REPLACE INTO {$tbl} ({$cols}) VALUES ({$ph})",$args));
+      $args=$w===null?[$park,$aid,$name?:$en,$st,$recorded,$record_slot]:[$park,$aid,$name?:$en,$w,$st,$recorded,$record_slot];
+      $wpdb->query($wpdb->prepare("INSERT INTO {$tbl} ({$cols}) VALUES ({$ph}) ON DUPLICATE KEY UPDATE wait_min=IF(VALUES(recorded_at)>=recorded_at,VALUES(wait_min),wait_min),status=IF(VALUES(recorded_at)>=recorded_at,VALUES(status),status),recorded_at=GREATEST(recorded_at,VALUES(recorded_at))",$args));
       $n++;
     }
   }
@@ -508,25 +541,142 @@ function tdrt_is_open($park){
     $cl = tdrt_t2m($h['close']);
     return $o >= 0 && $cl >= 0 && $now >= $o && $now < $cl;
   }
-  return $now >= 480 && $now < 1290; // 08:00 to 21:30
+  return $now >= 480 && $now < 1260; // 08:00 to 21:00 when official hours are unavailable
 }
 
 function tdrt_items_by_src($srcs,$lim=100){
   global $wpdb;
   if(!is_array($srcs))$srcs=[$srcs];
-  $rows=$wpdb->get_results("SELECT option_id,option_name,option_value FROM {$wpdb->options} WHERE option_name LIKE 'tdr_mon_item_%' ORDER BY option_id DESC LIMIT 200");
-  $out=[];
+  // Long-running closures must not fall out of the newest 200 general news items.
+  $stop_sources=!array_diff($srcs,['stop_tdl','stop_tds']);
+  $official_items=[];
+  if($stop_sources){
+    $legacy_sources=[];
+    foreach($srcs as $source){
+      $park=substr($source,5);
+      $snapshot=get_option('tdrt_closures_'.$park,[]);
+      if(is_array($snapshot) && !empty($snapshot['checked_at']) && !empty($snapshot['items']) && is_array($snapshot['items'])){
+        foreach($snapshot['items'] as $item)$official_items[]=$item;
+      }else{$legacy_sources[]=$source;}
+    }
+    if(!$legacy_sources)return array_slice($official_items,0,$lim);
+    $srcs=$legacy_sources;
+  }
+  $where='';
+  if($stop_sources){
+    $parts=[];foreach($srcs as $src)$parts[]=$wpdb->prepare('option_value LIKE %s','%'. $wpdb->esc_like('"'.$src.'"') .'%');
+    $where=' AND ('.implode(' OR ',$parts).')';
+  }
+  $limit=$stop_sources?2000:200;
+  $rows=$wpdb->get_results("SELECT option_id,option_name,option_value FROM {$wpdb->options} WHERE option_name LIKE 'tdr_mon_item_%' {$where} ORDER BY option_id DESC LIMIT {$limit}");
+  $out=$official_items;$seen_stops=[];
   foreach($rows as $r){
     $v=maybe_unserialize($r->option_value);
     if(!is_array($v)&&is_string($r->option_value)){$d=json_decode($r->option_value,true);if(is_array($d))$v=$d;}
     if(!is_array($v))continue;
     if(!in_array($v['source']??'',$srcs,true))continue;
+    // Official closure end verified 2026-10-13: /tds/attraction/detail/222/.
+    // Correct only the legacy open-ended record; retain later official periods.
+    if(($v['source']??'')==='stop_tds' && preg_match('#^インディ・ジョーンズ・アドベンチャー：クリスタルスカルの魔宮｜2025/8/18\s*-\s*未定$#u',$v['title']??'')){
+      $v['title']='インディ・ジョーンズ・アドベンチャー：クリスタルスカルの魔宮｜2025/8/18 - 2026/11/29';
+      $v['pubdate']='2025/8/18 - 2026/11/29';
+    }
+    if($stop_sources){
+      $period=tdrt_parse_stop_period($v['title']??'');
+      if($period){
+        $key=($v['source']??'').'|'.tdrt_stop_key(explode('｜',$v['title'])[0]).'|'.$period['start'];
+        if(isset($seen_stops[$key]))continue;
+        $seen_stops[$key]=true;
+      }
+    }
     $v['_id']=substr($r->option_name,strlen('tdr_mon_item_'));
     $out[]=$v;
     if(count($out)>=$lim)break;
   }
   return $out;
 }
+
+// Official closure snapshots replace historical news records, never merge with them.
+function tdrt_closure_health($park){
+  $v=get_option('tdrt_closures_'.$park,[]);
+  $checked=is_array($v)?(int)($v['checked_at']??0):0;
+  $count=is_array($v['items']??null)?count($v['items']):0;
+  return ['park'=>$park,'checked_at'=>$checked,'checked_at_jst'=>$checked?wp_date('Y-m-d H:i:s',$checked):null,
+    'age_seconds'=>$checked?max(0,time()-$checked):null,'count'=>$count,
+    'healthy'=>$checked>0 && $count>0 && time()-$checked<=DAY_IN_SECONDS];
+}
+
+function tdrt_validate_closure_items($park,$items){
+  if(!in_array($park,['tdl','tds'],true) || !is_array($items) || !$items || count($items)>300)
+    return new WP_Error('invalid_closures','A complete, non-empty official closure list is required.',['status'=>400]);
+  $out=[];$seen=[];
+  foreach($items as $item){
+    if(!is_array($item))return new WP_Error('invalid_closure','Invalid closure item.',['status'=>400]);
+    $title=sanitize_text_field($item['title']??'');
+    $url=esc_url_raw($item['url']??'');
+    $period=tdrt_parse_stop_period($title);
+    if(!$period || !preg_match('#｜\d{4}/\d{1,2}/\d{1,2}(?:\s*-\s*(?:\d{4}/\d{1,2}/\d{1,2}|未定))?$#u',$title) || wp_parse_url($url,PHP_URL_HOST)!=='www.tokyodisneyresort.jp' || strpos(wp_parse_url($url,PHP_URL_PATH)??'','/'.$park.'/')!==0)
+      return new WP_Error('invalid_closure','Official park URL and valid period are required.',['status'=>400]);
+    foreach([$period['start'],$period['end']] as $date){
+      if($date===null)continue;
+      [$y,$m,$d]=array_map('intval',explode('-',$date));
+      if(!checkdate($m,$d,$y))return new WP_Error('invalid_closure_date','Invalid date.',['status'=>400]);
+    }
+    if($period['end']!==null && $period['end']<$period['start'])
+      return new WP_Error('invalid_closure_date','End date precedes start date.',['status'=>400]);
+    $name=explode('｜',$title)[0];
+    $key=$name.'|'.$period['start'];
+    if(isset($seen[$key]))return new WP_Error('duplicate_closure','Duplicate facility and start date.',['status'=>400]);
+    $seen[$key]=true;
+    $out[]=['_id'=>substr(sha1($park.'|'.$key),0,16),'source'=>'stop_'.$park,'title'=>$title,'url'=>$url,
+      'pubdate'=>sanitize_text_field($item['pubdate']??''),'category'=>'休止','image_url'=>esc_url_raw($item['image_url']??'')];
+  }
+  return $out;
+}
+
+add_action('rest_api_init',function(){
+  register_rest_route('tdr-today/v1','/closures',[
+    'methods'=>'POST',
+    'permission_callback'=>function($req){
+      if(current_user_can('manage_options'))return true;
+      $expected=(string)get_option('tdr_mon_ingest_token','');
+      $provided=(string)$req->get_header('x-tdr-token');
+      return $expected!=='' && $provided!=='' && hash_equals($expected,$provided);
+    },
+    'callback'=>function($req){
+      $data=$req->get_json_params();$park=$data['park']??'';
+      $items=tdrt_validate_closure_items($park,$data['items']??null);
+      if(is_wp_error($items))return $items;
+      $snapshot=['checked_at'=>time(),'items'=>$items];
+      update_option('tdrt_closures_'.$park,$snapshot,false);
+      $readback=get_option('tdrt_closures_'.$park,[]);
+      if($readback!==$snapshot)return new WP_Error('closure_save_failed','Closure readback differs.',['status'=>500]);
+      return ['ok'=>true,'park'=>$park,'count'=>count($items),'checked_at'=>$snapshot['checked_at']];
+    },
+  ]);
+  register_rest_route('tdr-today/v1','/closure-data',[
+    'methods'=>'GET','permission_callback'=>function(){return current_user_can('manage_options');},
+    'callback'=>function($req){
+      $park=(string)$req->get_param('park');
+      if(!in_array($park,['tdl','tds'],true))return new WP_Error('invalid_park','Invalid park.',['status'=>400]);
+      return get_option('tdrt_closures_'.$park,[]);
+    },
+  ]);
+  register_rest_route('tdr-today/v1','/closure-health',[
+    'methods'=>'GET','permission_callback'=>function(){return current_user_can('manage_options');},
+    'callback'=>function(){return ['parks'=>array_map('tdrt_closure_health',['tdl','tds'])];},
+  ]);
+});
+
+add_action('admin_notices',function(){
+  if(!current_user_can('manage_options'))return;
+  $bad=[];
+  foreach(['tdl','tds'] as $park){
+    $h=tdrt_closure_health($park);
+    if(!$h['healthy'])$bad[]=strtoupper($park).'（最終成功: '.($h['checked_at_jst']?:'未取得').'）';
+  }
+  if($bad)echo '<div class="notice notice-error"><p>休止施設の自動更新を確認してください。24時間以上成功記録がありません: '.esc_html(implode('、',$bad)).'。公式ニュースに差分がなくても対応が必要です。</p></div>';
+});
 
 // Parse "...｜2026/5/22" / "...｜2026/3/24 - 2026/5/22" / "...｜2020/7/1 - 未定"
 function tdrt_parse_stop_period($title){
@@ -693,43 +843,59 @@ function tdrt_get_all_ticket_types($park){
       'available' => true,
     ];
   }
+
+  // ファンダフル・ディズニー・パスポート: 対象日フォールバック（2026-06-12追加）
+  // 公式モーダルから取得できない日でも、対象日なら通常1デー価格から自動計算して表示する。
+  // 対象日: 2026-04-06〜2026-09-11（公式ファンクラブ passport_2604-06 / passport_2607-09 で確認）
+  // 料金: 通常1デーより 大人-500円 / 中人-400円 / 小人-300円。期が変わったら対象日を更新すること。
+  $ff_listed = false;
+  foreach($list as $ffl){ if(strpos($ffl['name'], 'ファンダフル') !== false){ $ff_listed = true; break; } }
+  if(!$ff_listed && isset($types['general']['adult'])
+     && $today_ymd_dash >= '2026-04-06' && $today_ymd_dash <= '2026-09-11'){
+    $ffg = $types['general'];
+    $list[] = [
+      'name'      => 'ファンダフル・ディズニー・パスポート',
+      'badge'     => '対象日限定',
+      'prices'    => [
+        'adult'  => (int)$ffg['adult'] - 500,
+        'junior' => isset($ffg['junior']) ? (int)$ffg['junior'] - 400 : null,
+        'child'  => isset($ffg['child']) ? (int)$ffg['child'] - 300 : null,
+      ],
+      'is_fixed'  => false,
+      'condition' => 'ファンダフル・ディズニー会員限定・通常1デーより大人500円/中人400円/小人300円おトク',
+      'link'      => 'https://www.tokyodisneyresort.jp/treasure/fantasy/fanclub/index.php',
+      'available' => true,
+    ];
+  }
+
   return $list;
 }
 
-// 優先順位:
-//   1. tdrt_waits_<park> (我々が /realtime endpoint で取得・4時間以内のもの) ← DWR が止まっても動く
-//      freshness window が 60分→4時間 (14400s) に拡張された (v1.3.7)。理由：GitHub Actions
-//      の schedule が free-tier で実態 ~2時間遅延するケースがあり、60分だと毎回 stale 判定
-//      で死んだ dwr_latest_<park> にフォールバックしてヒートマップが frozen 値で固定化していた。
-//   2. dwr_latest_<park> (DWR plugin の出力)
-//   3. dwr_prev_<park>   (DWR の前回値)
+// Timestamped sources only. Never substitute unversioned DWR last/previous values.
+function tdrt_fresh_waits($payload,$now){
+  if(!is_array($payload) || !in_array($payload['source']??'', ['queue-times','official-fetcher'],true))return [];
+  $ts=(int)($payload['ts']??0);
+  if($ts<$now-1200 || $ts>$now+60 || !is_array($payload['rows']??null))return [];
+  $out=[];
+  foreach($payload['rows'] as $r){
+    $at=(int)($r['observed_ts']??$ts);
+    if($at<$now-1200 || $at>$now+60)continue;
+    $r['observed_ts']=$at;
+    $w=$r['wait_min']??null;
+    if(($r['status']??'')!=='operating' || !is_numeric($w) || $w<0 || $w>480)$r['wait_min']=null;
+    $out[]=$r;
+  }
+  return $out;
+}
 function tdrt_wait_data_raw($park){
-  $own = get_option('tdrt_waits_'.$park, null);
-  if(is_array($own) && isset($own['rows']) && isset($own['ts'])){
-    if((int)$own['ts'] > (time() - 14400) && is_array($own['rows']) && !empty($own['rows'])){
-      foreach($own['rows'] as $r){
-        if(($r['status'] ?? '') === 'operating' && isset($r['wait_min']) && $r['wait_min'] !== '' && $r['wait_min'] !== null){
-          return $own['rows'];
-        }
-      }
-    }
-  }
-  $latest = get_option('dwr_latest_'.$park, []);
-  if(is_array($latest) && !empty($latest)){
-    foreach($latest as $r){
-      if(($r['status'] ?? '') === 'operating' && isset($r['wait_min']) && $r['wait_min'] !== '' && $r['wait_min'] !== null){
-        return $latest;
-      }
-    }
-  }
-  $prev = get_option('dwr_prev_'.$park, []);
-  return is_array($prev) ? $prev : [];
+  return tdrt_fresh_waits(get_option('tdrt_waits_'.$park,null),time());
 }
 function tdrt_wait_data($park){
   $rows = tdrt_wait_data_raw($park);
   if(!is_array($rows)) return [];
   foreach($rows as &$r){
     if(isset($r['name'])) $r['name'] = tdrt_fix_name($r['name']);
+    $r['observed_ts']=(int)($r['observed_ts']??0);
   }
   unset($r);
   return $rows;
@@ -747,10 +913,13 @@ function tdrt_top_waits($park,$lim=10){
 
 // キャラクターグリーティング: fetcher.py が `tdrt_greet_tdl` / `tdrt_greet_tds` に書き込む
 function tdrt_greet_data($park){
+  $at=(int)get_option('tdrt_greet_observed_'.$park,0);
+  if(!$at || $at<time()-1200 || $at>time()+60 || wp_date('Y-m-d',$at)!==wp_date('Y-m-d'))return [];
   $rows = get_option('tdrt_greet_'.$park, []);
   if(!is_array($rows)) return [];
   foreach($rows as &$r){
     if(isset($r['name'])) $r['name'] = tdrt_fix_name($r['name']);
+    $r['observed_ts']=(int)($r['observed_ts']??$at);
   }
   unset($r);
   return $rows;
@@ -779,12 +948,52 @@ function tdrt_grade($park){
   return ['grade'=>'E','label'=>'快適','avg'=>round($avg)];
 }
 
+// 天気: ウェザーニュース浦安(12227)を第一ソース、失敗時Open-Meteoフォールバック。
+// 返り値の正規形: ['name','tmax','tmin','pop','emoji','source']
 function tdrt_weather(){
-  $c=get_transient('tdrt_w');if($c!==false)return $c;
+  $c=get_transient('tdrt_w2');if($c!==false)return $c;
+  $w=tdrt_weather_wn();
+  if(!$w)$w=tdrt_weather_om();
+  if($w)set_transient('tdrt_w2',$w,HOUR_IN_SECONDS);
+  return $w;
+}
+// ウェザーニュース浦安の「今日の天気」ブロックをパース
+function tdrt_weather_wn(){
+  $u='https://weathernews.jp/onebox/tenki/chiba/12227/';
+  $r=wp_remote_get($u,['timeout'=>8,'headers'=>['User-Agent'=>'Mozilla/5.0']]);
+  if(is_wp_error($r))return null;
+  $h=wp_remote_retrieve_body($r);if(!$h)return null;
+  $i=mb_strpos($h,'今日の天気');$j=mb_strpos($h,'明日の天気');
+  if($i===false||$j===false||$j<=$i)return null;
+  $blk=mb_substr($h,$i,$j-$i);
+  $txt=preg_replace('/\\s+/u',' ',preg_replace('/<[^>]+>/u',' ',$blk));
+  if(!preg_match('/\\)\\s*([ぁ-んァ-ヶ一-龠々ー]+(?:時々|のち|一時)?[ぁ-んァ-ヶ一-龠々ー]*)/u',$txt,$mn))return null;
+  if(!preg_match('/最高\\s*(\\d+)\\s*℃/u',$txt,$mx))return null;
+  if(!preg_match('/最低\\s*(\\d+)\\s*℃/u',$txt,$mi))return null;
+  preg_match_all('/(\\d+)\\s*%/u',$txt,$pm);
+  $pop=0;if(!empty($pm[1])){foreach($pm[1] as $p){$pop=max($pop,(int)$p);}}
+  return ['name'=>$mn[1],'tmax'=>(int)$mx[1],'tmin'=>(int)$mi[1],'pop'=>$pop,'emoji'=>tdrt_wn_emoji($mn[1]),'source'=>'wn'];
+}
+function tdrt_wn_emoji($n){
+  if(mb_strpos($n,'雷')!==false)return'⛈';
+  if(mb_strpos($n,'雪')!==false)return'❄️';
+  if(mb_strpos($n,'雨')!==false)return mb_strpos($n,'晴')!==false?'🌦':'🌧';
+  if(mb_strpos($n,'霧')!==false)return'🌫';
+  if($n==='晴れ'||$n==='快晴')return'☀️';
+  $sun=mb_strpos($n,'晴')!==false;$cloud=(mb_strpos($n,'くもり')!==false||mb_strpos($n,'曇')!==false);
+  if($sun&&$cloud)return'🌤';
+  if($cloud)return'☁️';
+  if($sun)return'🌤';
+  return'☁️';
+}
+// Open-Meteo フォールバック（正規形にマップ）
+function tdrt_weather_om(){
   $u='https://api.open-meteo.com/v1/forecast?latitude=35.6329&longitude=139.8804&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FTokyo&forecast_days=1';
   $r=wp_remote_get($u,['timeout'=>8]);if(is_wp_error($r))return null;
-  $d=json_decode(wp_remote_retrieve_body($r),true);if(!is_array($d))return null;
-  set_transient('tdrt_w',$d,HOUR_IN_SECONDS);return $d;
+  $d=json_decode(wp_remote_retrieve_body($r),true);
+  if(!is_array($d)||!isset($d['daily']['weathercode'][0]))return null;
+  $wc=(int)$d['daily']['weathercode'][0];
+  return ['name'=>tdrt_wl($wc),'tmax'=>round($d['daily']['temperature_2m_max'][0]),'tmin'=>round($d['daily']['temperature_2m_min'][0]),'pop'=>(int)$d['daily']['precipitation_probability_max'][0],'emoji'=>tdrt_we($wc),'source'=>'om'];
 }
 function tdrt_we($c){if($c===0)return'☀️';if($c<=3)return'🌤';if($c===45||$c===48)return'🌫';if($c<=67)return'🌧';if($c<=77)return'❄️';if($c<=82)return'🌧';if($c>=95)return'⛈';return'☁️';}
 function tdrt_wl($c){if($c===0)return'快晴';if($c<=3)return'曇り';if($c<=48)return'霧';if($c<=67)return'雨';if($c<=77)return'雪';if($c<=82)return'にわか雨';return'雷雨';}
@@ -835,7 +1044,7 @@ function tdrt_hub($a){
 <div class="d"><?php echo esc_html($today);?> · <?php echo esc_html($pl);?><?php if(!$is_open):?> · <span style="color:#999">🌙 営業時間外</span><?php endif;?></div>
 <div class="g">
 <div class="c"><div class="cl">運営時間</div><?php if($open_eff):?><div class="cv" style="font-size:16px"><?php echo esc_html($open_eff);?>〜<?php echo esc_html($close_eff??'');?></div><?php else:?><div class="cv">—</div><?php endif;?><?php if($he_time):?><div class="cs" style="margin-top:6px">🌅 <strong>HE <?php echo esc_html($he_time);?></strong></div><?php endif;?></div>
-<div class="c"><div class="cl">天気</div><?php if($w&&isset($w['daily']['weathercode'][0])):$wc=(int)$w['daily']['weathercode'][0];$tx=round($w['daily']['temperature_2m_max'][0]);$tn=round($w['daily']['temperature_2m_min'][0]);$pp=(int)$w['daily']['precipitation_probability_max'][0];?><div class="cv"><?php echo tdrt_we($wc);?> <?php echo esc_html(tdrt_wl($wc));?></div><div class="cs"><?php echo "{$tn}℃/{$tx}℃　降水{$pp}%";?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
+<div class="c"><div class="cl">天気</div><?php if($w&&isset($w['name'])):?><div class="cv"><?php echo $w['emoji'];?> <?php echo esc_html($w['name']);?></div><div class="cs"><?php echo esc_html("{$w['tmin']}℃/{$w['tmax']}℃　降水{$w['pop']}%");?></div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">混雑度</div><?php if($g):?><div class="cv g<?php echo $g['grade'];?>"><?php echo $g['grade'];?></div><div class="cs"><?php echo esc_html($g['label']);?> 平均<?php echo $g['avg'];?>分</div><?php elseif(!$is_open):?><div class="cv" style="font-size:14px;color:#999">🌙</div><div class="cs">営業時間外</div><?php else:?><div class="cv">—</div><?php endif;?></div>
 <div class="c"><div class="cl">休止施設</div><div class="cv"><?php echo $stops_total;?>件</div><div class="cs">下のリスト参照</div></div>
 </div>
@@ -863,10 +1072,12 @@ function tdrt_hub($a){
 <p style="text-align:right;margin-top:8px"><a href="<?php echo home_url('/today-'.$park.'/#greet-history');?>" style="font-size:12px">過去の待ち時間推移を見る ↓</a></p>
 <?php elseif($is_open): ?>
 <h3>🤝 キャラクターグリーティング 待ち時間</h3>
-<p style="color:#aaa;text-align:center;padding:12px;background:#f8f8f8;border-radius:8px;font-size:12px">本日のグリーティング情報を取得中…（10分前後で反映されます）</p>
+<p style="color:#aaa;text-align:center;padding:12px;background:#f8f8f8;border-radius:8px;font-size:12px">現在のグリーティング待ち時間は確認できていません。公式アプリでご確認ください。</p>
 <?php endif; ?>
 
 <h3>🚫 今日の休止施設 (<?php echo $stops_total;?>件)</h3>
+<?php $closure_health=tdrt_closure_health($park); ?>
+<p class="tdrt-closure-check" style="font-size:0.85em;color:#46556b;">公式休止情報の最終確認: <?php echo esc_html($closure_health['checked_at_jst']?:'未取得'); ?><?php if(!$closure_health['healthy']): ?>（更新確認が必要です。<a href="https://www.tokyodisneyresort.jp/<?php echo esc_attr($park); ?>/monthly/stop.html">公式の休止一覧</a>をご確認ください）<?php endif; ?></p>
 <?php
 // TDL は ショー＋パレードを「ショー・パレード」として合体表示。TDS は ショーのみ。
 $shops_merged = array_merge($stops_today['shop'] ?? [], $stops_today['restaurant'] ?? []);
@@ -923,7 +1134,7 @@ $all_tickets = tdrt_get_all_ticket_types($park);
 $ticket_today = array_values(array_filter($all_tickets, function($t){ return !empty($t['available']) && !empty($t['prices']['adult']); }));
 if($ticket_today):
 ?>
-<h3>💴 今日販売中のチケット</h3>
+<h3>💴 今日販売のチケット</h3>
 <div style="font-size:13px;background:#fff;margin:8px 0">
 <?php
 $cat_labels = ['adult'=>'大人','junior'=>'中人','child'=>'小人'];
@@ -970,7 +1181,7 @@ if($is_open){
 } else {
 ?>
 <h3>🎫 <?php echo esc_html($pl);?> パス発券状況</h3>
-<p style="color:#888;text-align:center;padding:16px;background:#f8f8f8;border-radius:8px;font-size:13px">🌙 現在パークは営業時間外です。<br>明日の開園後にDPA・プライオリティパスの発券状況をリアルタイム表示します。</p>
+<p style="color:#888;text-align:center;padding:16px;background:#f8f8f8;border-radius:8px;font-size:13px">🌙 現在パークは営業時間外です。<br>DPA・スタンバイパスの現在の案内は公式アプリでご確認ください。</p>
 <?php
 }
 ?>
@@ -985,59 +1196,225 @@ if($is_open){
 }
 add_shortcode('tdr_today_hub','tdrt_hub');
 
+// History uses dated park hours when available; never show the default after 21:00.
+function tdrt_history_close($park,$day){
+  $saved=get_option('tdrt_park_hours_'.str_replace('-','',$day),[]);
+  $h=$saved[$park]??null;
+  if(!$h && $day===wp_date('Y-m-d'))$h=tdrt_hours($park);
+  $close=is_array($h)?tdrt_t2m($h['close']??''):-1;
+  return $close>0?$close:1260;
+}
+// Status is inferred only from successful observations, never from a failed request.
+function tdrt_stop_key($name){
+  return preg_replace('/[\s　・：:「」『』!！?？®™]/u','',tdrt_fix_name($name));
+}
+function tdrt_history_stops($park,$day){
+  static $cache=[];$key=$park.'|'.$day;
+  if(isset($cache[$key]))return $cache[$key];
+  $names=[];
+  foreach(tdrt_items_by_src('stop_'.$park) as $item){
+    $title=$item['title']??'';$period=tdrt_parse_stop_period($title);
+    if(!$period || $period['start']>$day || ($period['end']!==null && $period['end']<$day))continue;
+    $name=tdrt_stop_key(trim(explode('｜',$title)[0]));
+    if($name!=='')$names[$name]=true;
+  }
+  return $cache[$key]=$names;
+}
+function tdrt_is_history_stopped($name,$stops){
+  $key=tdrt_stop_key($name);
+  if(isset($stops[$key]))return true;
+  // A facility-wide closure also applies to its named character variants.
+  foreach($stops as $base=>$unused){
+    if(strpos($key,$base.'（')===0 || strpos($key,$base.'(')===0)return true;
+  }
+  return false;
+}
+function tdrt_history_state($name,$wait,$status,$at,$previous,$close,$stops,$max_gap=1200){
+  if(tdrt_is_history_stopped($name,$stops) || $status==='all_day_closed')return 'all_day_closed';
+  if($status==='operating' && is_numeric($wait) && $wait>=0 && $wait<=480)return 'operating';
+  if(!in_array($status,['closed','suspended','ended'],true))return 'unknown';
+  if($status==='ended')return 'ended';
+  $pt=(int)($previous['observed_ts']??0);
+  if($pt && $at>=$pt && $at-$pt<=$max_gap && wp_date('Y-m-d',$at)===wp_date('Y-m-d',$pt)){
+    $ps=$previous['history_status']??($previous['status']??'');
+    if($ps==='ended')return 'ended';
+    $pw=$previous['wait_min']??null;
+    // Strictly later than closing, with the actual observation time (not the slot label).
+    $minute=(int)wp_date('H',$at)*60+(int)wp_date('i',$at)+(int)wp_date('s',$at)/60;
+    if($at>$pt && $ps==='operating' && is_numeric($pw) && $pw>=0 && $pw<=480 && $minute+$pw>$close)return 'ended';
+  }
+  return 'suspended';
+}
+function tdrt_history_state_label($status){
+  return ['all_day_closed'=>'終日運営中止','ended'=>'案内終了','suspended'=>'一時運営中止'][$status]??'未取得';
+}
+
+function tdrt_with_previous($rows,$previous,$park=null){
+  $map=[];foreach((array)$previous as $r){if(isset($r['name']))$map[$r['name']]=$r;}
+  foreach($rows as &$r){
+    $p=$map[$r['name']]??null;
+    if($park!==null){
+      $at=(int)($r['observed_ts']??0);$day=wp_date('Y-m-d',$at);
+      $r['history_status']=tdrt_history_state($r['name'],$r['wait_min']??null,$r['status']??'',$at,$p,tdrt_history_close($park,$day),tdrt_history_stops($park,$day));
+    }
+    if(!$p)continue;
+    $at=(int)($r['observed_ts']??0);$pt=(int)($p['observed_ts']??0);
+    if($at===$pt){foreach(['previous_wait_min','previous_observed_ts'] as $key){if(isset($p[$key]))$r[$key]=$p[$key];}}
+    elseif($at>$pt && $at-$pt<=1200 && wp_date('Y-m-d',$at)===wp_date('Y-m-d',$pt) && ($p['status']??'')==='operating' && is_numeric($p['wait_min']??null)){
+      $r['previous_wait_min']=(int)$p['wait_min'];$r['previous_observed_ts']=$pt;
+    }
+  }unset($r);return $rows;
+}
+function tdrt_wait_trend($r,$now){
+  $at=(int)($r['observed_ts']??0);$pt=(int)($r['previous_observed_ts']??0);
+  if(($r['status']??'')!=='operating'||!is_numeric($r['wait_min']??null)||!is_numeric($r['previous_wait_min']??null)||!$pt||$at<=$pt||$at-$pt>1200||$now-$at>1200||$at>$now||wp_date('Y-m-d',$at)!==wp_date('Y-m-d',$pt))return 0;
+  $delta=(int)$r['wait_min']-(int)$r['previous_wait_min'];return abs($delta)>=20?$delta:0;
+}
+// Collect the official public greeting feed within the existing five-minute job.
+function tdrt_fetch_official_greetings($park){
+  $res=wp_remote_get('https://www.tokyodisneyresort.jp/_/realtime/'.$park.'_greeting.json?'.time(),['timeout'=>8,'headers'=>['Accept'=>'application/json'],'user-agent'=>'TDR-Today/1.5.10']);
+  if(is_wp_error($res))return ['ok'=>false,'error'=>$res->get_error_message()];
+  if(wp_remote_retrieve_response_code($res)!==200)return ['ok'=>false,'http'=>wp_remote_retrieve_response_code($res)];
+  $data=json_decode(wp_remote_retrieve_body($res),true);if(!is_array($data))return ['ok'=>false,'error'=>'invalid_json'];
+  $rows=[];$today=wp_date('Ymd');$now=time();
+  foreach($data as $area){if(!is_array($area))continue;foreach(($area['Facility']??[]) as $f){
+    $g=$f['greeting']??[];$name=$g['FacilityName']??'';if(!$name)continue;
+    $valid_day=false;$operating=false;
+    foreach(($g['operatinghours']??[]) as $hours){
+      if(($hours['OperatingHoursFromDate']??'')!==$today)continue;
+      $valid_day=true;
+      if(($hours['OperatingStatusCD']??'')==='001')$operating=true;
+    }
+    if(!$valid_day)continue;
+    $w=$g['StandbyTime']??null;
+    $w=$operating && is_numeric($w) && $w>=0 && $w<=480?(int)$w:null;
+    // observed_ts is collection time: the endpoint confirms this day's current state.
+    $rows[]=['name'=>tdrt_fix_name($name),'location'=>$area['AreaJName']??'','status'=>$operating?'operating':'closed','wait_min'=>$w,'observed_ts'=>$now];
+  }}
+  if(!$rows)return ['ok'=>false,'error'=>'no_current_day_rows'];
+  $rows=tdrt_with_previous($rows,get_option('tdrt_greet_'.$park,[]),$park);
+  update_option('tdrt_greet_'.$park,$rows,false);update_option('tdrt_greet_observed_'.$park,$now,false);
+  return ['ok'=>true,'count'=>count($rows),'at'=>wp_date('Y-m-d H:i:s',$now)];
+}
+
 function tdrt_heatmap($a){
   global $wpdb;
   $a=shortcode_atts(['park'=>'tdl','type'=>'attr'],$a,'tdr_today_heatmap');
   $base=strtolower($a['park'])==='tds'?'tds':'tdl';
-  // type='greet' なら park='tdl_g'/'tds_g'、'attr' (default) なら park='tdl'/'tds'
-  $park = ($a['type']==='greet') ? $base.'_g' : $base;
-  $tbl=tdrt_table();$today=wp_date('Y-m-d');
-  $rows=$wpdb->get_results($wpdb->prepare("SELECT attr_id,attr_name,wait_min,status,slot_key FROM {$tbl} WHERE park=%s AND DATE(recorded_at)=%s ORDER BY slot_key ASC",$park,$today));
-  if(!$rows)return '<p style="text-align:center;color:#aaa;padding:20px">本日のデータはまだありません。15分ごとに自動収集中。</p>';
-  // v1.5.4: 休止中のアトラクションを heatmap から除外（attr 種別のみ）
-  $stopped_names = ($a['type']==='greet') ? [] : tdrt_get_stopped_attraction_names();
-  // 同一表記の重複統合 (例: 海底2万マイル vs 海底２万マイル)
-  $m=[];$nm=[];$sl=[];$tot=[];$name_to_aid=[];
-  foreach($rows as $r){
-    $fixed_name = tdrt_fix_name($r->attr_name);
-    if(isset($stopped_names[$fixed_name])) continue;
-    // 同名attr_idの統合：fix後の name が既に別aid で見えていたら、その aid を使う
-    if(isset($name_to_aid[$fixed_name]) && $name_to_aid[$fixed_name] !== $r->attr_id){
-      $aid = $name_to_aid[$fixed_name];
-    } else {
-      $aid = $r->attr_id;
-      $name_to_aid[$fixed_name] = $aid;
+  $greet=$a['type']==='greet'; $park=$greet?$base.'_g':$base;
+  $today=wp_date('Y-m-d');$tbl=tdrt_table();
+  $requested=isset($_GET['tw_date']) && is_string($_GET['tw_date'])?sanitize_text_field(wp_unslash($_GET['tw_date'])):$today;
+  $day=preg_match('/^\d{4}-\d{2}-\d{2}$/',$requested) && $requested<=$today && $requested>=substr(tdrt_verified_from(),0,10)?$requested:$today;
+  $is_today=$day===$today;$close=tdrt_history_close($base,$day);
+  $days=$wpdb->get_col($wpdb->prepare("SELECT DISTINCT DATE(recorded_at) FROM {$tbl} WHERE park IN (%s,%s) AND recorded_at>=%s AND wait_min IS NOT NULL ORDER BY recorded_at DESC LIMIT 90",$base,$base.'_g',tdrt_verified_from()));
+  $days=array_values(array_unique(array_merge([$today],$days,[$day])));rsort($days);
+  $source_rows=$greet?tdrt_greet_data($base):tdrt_wait_data_raw($base);$trends=[];
+  if($is_today && tdrt_is_open($base)){foreach($source_rows as $r){$trends[tdrt_fix_name($r['name']??'')]=tdrt_wait_trend($r,time());}}
+
+  $from=max($day.' 00:00:00',tdrt_verified_from());
+  $rows=$wpdb->get_results($wpdb->prepare("SELECT attr_name,wait_min,status,slot_key,recorded_at FROM {$tbl} WHERE park=%s AND recorded_at>=%s AND recorded_at<=%s ORDER BY recorded_at ASC,id ASC",$park,$from,$is_today?current_time('mysql'):$day.' 23:59:59'));
+  // Merge the fresh provider snapshot so this view agrees with the current TOP 10.
+  if($is_today){
+    foreach($source_rows as $r){
+      $at=(int)($r['observed_ts']??0);
+      if(!$at || wp_date('Y-m-d',$at)!==$today || $at>time())continue;
+      $dt=wp_date('Y-m-d H:i:s',$at);
+      if($dt<$from)continue;
+      $rows[]=(object)['attr_name'=>$r['name']??'', 'wait_min'=>$r['wait_min']??null,'status'=>$r['history_status']??($r['status']??''), 'recorded_at'=>$dt, 'slot_key'=>wp_date('YmdH',$at).((int)wp_date('i',$at)<30?'00':'30')];
     }
-    $sk = (int)$r->slot_key;
-    // 既存のセルがあれば優先（先に来た方を残す。null よりは値があれば上書き）
-    if(!isset($m[$aid][$sk]) || ($m[$aid][$sk]['w'] === null && $r->wait_min !== null)){
-      $m[$aid][$sk] = ['w'=>$r->wait_min===null?null:(int)$r->wait_min,'s'=>$r->status];
-    }
-    $nm[$aid] = $fixed_name;
-    $sl[$sk] = 1;
-    if($r->wait_min!==null) $tot[$aid] = ($tot[$aid]??0) + (int)$r->wait_min;
   }
-  $ks=array_keys($sl);sort($ks);arsort($tot);
-  $ord=array_merge(array_keys($tot),array_diff(array_keys($nm),array_keys($tot)));
-  $cls=function($w){if($w===null)return 'h0';if($w>=180)return 'h6';if($w>=120)return 'h5';if($w>=80)return 'h4';if($w>=50)return 'h3';if($w>=20)return 'h2';return 'h1';};
+  // Sort the merged current snapshot with history before comparing consecutive observations.
+  usort($rows,function($a,$b){return strcmp($a->recorded_at,$b->recorded_at);});
+  $m=[];$slots=[];$latest='';$previous_cells=[];$stops=tdrt_history_stops($base,$day);
+  foreach($rows as $r){
+    $name=tdrt_fix_name($r->attr_name);$slot=(string)$r->slot_key;
+    if(substr($slot,0,8)!==str_replace('-','',$day))continue;
+    $minutes=(int)substr($slot,8,2)*60+(int)substr($slot,10,2);
+    if($minutes>=$close || tdrt_t2m(substr($r->recorded_at,11,5))>=$close)continue;
+    $w=$r->wait_min===null?null:(int)$r->wait_min;
+    $dt=date_create_from_format('Y-m-d H:i:s',$r->recorded_at,wp_timezone());
+    $at=$dt?$dt->getTimestamp():0;
+    // Older history has one observation per half hour; never bridge missing slots.
+    $status=tdrt_history_state($name,$w,$r->status,$at,$previous_cells[$name]??null,$close,$stops,3600);
+    if($status!=='operating' || $w<0 || $w>480)$w=null;
+    $previous_cells[$name]=['observed_ts'=>$at,'wait_min'=>$w,'status'=>$status];
+    if(isset($m[$name][$slot]) && $m[$name][$slot]['at']>$r->recorded_at)continue;
+    $m[$name][$slot]=['w'=>$w,'s'=>$status,'at'=>$r->recorded_at];
+    $slots[$slot]=1;$latest=max($latest,$r->recorded_at);
+  }
+  ksort($slots);$keys=array_keys($slots);
+  // Empty pre-opening snapshots are not visitor wait-time history.
+  $first_numeric=null;
+  foreach($keys as $k){foreach($m as $cells){if(isset($cells[$k]) && $cells[$k]['w']!==null){$first_numeric=$k;break 2;}}}
+  $keys=$first_numeric===null?[]:array_values(array_filter($keys,function($k)use($first_numeric){return $k>=$first_numeric;}));
+  // Fill gaps between recorded slots so missing half hours cannot disappear.
+  if($keys){$first=(int)substr($keys[0],8,2)*60+(int)substr($keys[0],10,2);$last_key=end($keys);$last=(int)substr($last_key,8,2)*60+(int)substr($last_key,10,2);$keys=[];for($minute=$first;$minute<=$last && $minute<$close;$minute+=30)$keys[]=str_replace('-','',$day).sprintf('%02d%02d',intdiv($minute,60),$minute%60);}
+  $means=[];
+  foreach($m as $name=>$cells){
+    ksort($m[$name]);$values=[];
+    foreach($keys as $k){if(isset($cells[$k]) && $cells[$k]['w']!==null)$values[]=$cells[$k]['w'];}
+    $means[$name]=['n'=>count($values),'avg'=>$values?round(array_sum($values)/count($values)):null];
+  }
+  $names=array_keys($m);
+  usort($names,function($a,$b)use($m){$aa=end($m[$a]);$bb=end($m[$b]);return ($bb['w']??-1)<=>($aa['w']??-1) ?: strcmp($a,$b);});
+  $id=wp_unique_id('tdr-wait-');
+  $class=function($w){return $w===null?'tw-missing':($w<20?'low':($w<50?'mild':($w<80?'busy':($w<120?'high':($w<180?'very-high':'peak')))));};
   ob_start();?>
-<style>.thm{overflow-x:auto;margin:16px 0;-webkit-overflow-scrolling:touch}
-.thm table{border-collapse:collapse;font-size:11px;background:#fff}
-.thm th,.thm td{border:1px solid #ddd;text-align:center;padding:4px 6px;min-width:36px;white-space:nowrap}
-.thm thead th{background:#2a2a3a;color:#fff;writing-mode:vertical-rl;text-orientation:mixed;padding:8px 4px;font-weight:600;width:32px;min-width:32px;max-width:32px;height:180px;line-height:1.15;font-size:10px;vertical-align:bottom}
-.thm thead th:first-child{writing-mode:initial;text-orientation:initial;max-width:none;min-width:50px;height:auto}
-.thm tbody th{background:#f5f5f5;text-align:right;padding-right:6px;font-weight:500;position:sticky;left:0}
-.h0{background:#fafafa;color:#ccc}.h1{background:#fff}.h2{background:#e0f2ff}.h3{background:#fff8b3}.h4{background:#ffd699}.h5{background:#ff9999}.h6{background:#cc4444;color:#fff;font-weight:600}
-.thml{font-size:11px;color:#666;margin-bottom:6px}.thml span{display:inline-block;padding:2px 8px;border-radius:3px;margin-right:4px;border:1px solid #ddd}</style>
-<div class="thml"><span class="h1">~20分</span><span class="h2">~50分</span><span class="h3">~80分</span><span class="h4">~120分</span><span class="h5">~180分</span><span class="h6">180+</span></div>
-<div class="thm"><table><thead><tr><th>時刻</th><?php foreach($ord as $aid):?><th><?php echo esc_html($nm[$aid]);?></th><?php endforeach;?></tr></thead><tbody>
-<?php foreach($ks as $sk):$hh=(int)substr((string)$sk,8,2);$mm=(int)substr((string)$sk,10,2);?>
-<tr><th><?php printf('%02d:%02d',$hh,$mm);?></th>
-<?php foreach($ord as $aid):$cell=$m[$aid][$sk]??null;$w=$cell['w']??null;$s=$cell['s']??'';$c=$cls($w);$d=$w===null?'-':($s&&$s!=='operating'?'休':$w);?>
-<td class="<?php echo $c;?>"><?php echo esc_html($d);?></td>
-<?php endforeach;?></tr>
-<?php endforeach;?>
-</tbody></table></div>
+<style>
+.tdr-waits{--tw-bg:#fff;--tw-fg:#25364a;--tw-line:#dce4ed;--tw-soft:#f1f5f9;color:var(--tw-fg);margin:20px 0;font-size:14px;background:var(--tw-bg);padding:14px;border-radius:12px}
+.tdr-waits *{box-sizing:border-box}.tdr-waits p{color:var(--tw-fg)!important;font-size:13px;line-height:1.7;margin:8px 0}
+.tdr-waits .tw-top{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-weight:700}.tdr-waits .tw-date{font-size:18px}.tdr-waits .tw-status{background:var(--tw-soft);padding:4px 10px;border-radius:20px;font-size:12px}
+.tdr-waits .tw-tools{display:flex;flex-wrap:wrap;gap:12px;margin:16px 0 8px}.tdr-waits label{font-size:12px;font-weight:700;flex:1;min-width:130px}.tdr-waits input,.tdr-waits select{display:block;width:100%;border:1px solid var(--tw-line);border-radius:8px;background:var(--tw-bg);color:var(--tw-fg);padding:10px;font-size:16px;min-height:44px;margin-top:4px}
+.tdr-waits .tw-scroll{overflow:auto;max-height:620px;border:1px solid var(--tw-line);border-radius:10px;overscroll-behavior-x:contain;background:var(--tw-bg)}
+.tdr-waits table{border-collapse:separate;border-spacing:0;width:100%;margin:0;font-size:14px;table-layout:auto;color:var(--tw-fg)}
+.tdr-waits th,.tdr-waits td{border:0;border-right:1px solid var(--tw-line);border-bottom:1px solid var(--tw-line);padding:10px 6px;text-align:center;min-width:62px;white-space:nowrap;vertical-align:middle}
+.tdr-waits thead th{position:sticky;top:0;background:#203d60;color:#fff;z-index:2;font-size:12px;font-weight:600}
+.tdr-waits th:first-child{position:sticky;left:0;min-width:160px;width:190px;max-width:220px;white-space:normal;text-align:left;background:var(--tw-bg);color:var(--tw-fg);z-index:1;line-height:1.5;padding:10px;font-size:13px}
+.tdr-waits thead th:first-child{z-index:3;background:#203d60;color:#fff}.tdr-waits td small{display:block;font-size:10px;font-weight:400;margin-top:3px}.tdr-waits .tw-latest{font-weight:700}
+.tdr-waits .tw-legend{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0;font-size:11px}.tdr-waits .tw-legend span{padding:4px 7px;border-radius:4px;border:1px solid #d2dae4}
+.tdr-waits .low{background:#f7fbff;color:#23344a}.tdr-waits .mild{background:#dcedff;color:#153e66}.tdr-waits .busy{background:#fff3b0;color:#514000}.tdr-waits .high{background:#ffdbab;color:#6b3600}.tdr-waits .very-high{background:#ffc1bb;color:#712218}.tdr-waits .peak{background:#a12531;color:#fff}.tdr-waits .tw-missing{background:var(--tw-soft);color:var(--tw-fg);font-size:11px}.tdr-waits .tw-mean{background:#eaf4ee;color:#215847;font-weight:700;min-width:75px}.tdr-waits .tw-range{display:block;font-size:10px;font-weight:400}.tdr-waits .tw-average-note{padding:10px;background:#eaf4ee;border-radius:8px}
+.tdr-waits [hidden]{display:none!important}.tdr-waits .tw-empty{border:1px solid var(--tw-line);border-radius:10px;padding:20px;background:var(--tw-soft)}.tdr-waits a{color:#1765aa;text-decoration:underline}
+.tdr-waits :focus-visible{outline:3px solid #2187c9;outline-offset:3px}
+@media(max-width:600px){.tdr-waits th:first-child{min-width:126px;width:126px;max-width:126px;font-size:12px}.tdr-waits td,.tdr-waits th{min-width:54px;padding:9px 4px}.tdr-waits .tw-scroll{max-height:540px}}
+
+.tdr-waits .tw-row-mean{display:block;margin-top:5px;font-size:12px;color:#215847;font-weight:700}.tdr-waits .tw-row-mean.tw-avg-low{color:#226443}.tdr-waits .tw-row-mean.tw-avg-mild{color:#175d94}.tdr-waits .tw-row-mean.tw-avg-busy{color:#806000}.tdr-waits .tw-row-mean.tw-avg-high{color:#9a4800}.tdr-waits .tw-row-mean.tw-avg-very-high{color:#b32624}.tdr-waits .tw-row-mean.tw-avg-peak{color:#850e44}.tdr-waits .tw-row-mean.tw-avg-tw-missing{color:#596675}
+.tdr-waits td .tw-value{display:block;font-size:26px;font-weight:700;line-height:1.25;font-variant-numeric:tabular-nums}.tdr-waits td .tw-state{display:inline-block;max-width:4em;white-space:normal;word-break:keep-all;font-size:12px;line-height:1.5}
+@media(max-width:600px){.tdr-waits td .tw-value{font-size:23px}.tdr-waits td .tw-state{font-size:11px}}.tdr-waits .tw-trend{display:block;margin-top:5px;font-size:13px;font-weight:800}.tdr-waits .tw-trend span{display:block;font-size:10px}.tdr-waits .tw-rise{color:#b32624}.tdr-waits .tw-fall{color:#075bbb}.tdr-waits .tw-date-form{display:flex;align-items:flex-end;gap:8px;margin:12px 0}.tdr-waits .tw-date-form label{flex:1;max-width:260px;font-size:12px}.tdr-waits button{border:1px solid #ccd8d0;border-radius:8px;background:#edf5ef;color:#215847;padding:10px;min-height:44px;font-weight:700;cursor:pointer}.tdr-waits .tw-scroll-nav{display:flex;justify-content:space-between;gap:8px;margin:8px 0}.tdr-waits .tw-tools{align-items:flex-end}
+</style>
+<section class="tdr-waits" id="<?php echo esc_attr($id);?>" aria-label="待ち時間の推移">
+<div class="tw-top"><span class="tw-date"><?php echo esc_html(str_replace('-','/',$day));?></span><span class="tw-status"><?php echo !$is_today?'過去の記録':(tdrt_is_open($base)?'本日の記録':'営業時間外・本日の記録');?></span></div>
+<form class="tw-date-form" method="get" action="#wait-history"><label>過去の日付を見る<select name="tw_date" aria-label="待ち時間の記録日"><?php foreach($days as $date):?><option value="<?php echo esc_attr($date);?>" <?php selected($date,$day);?>><?php echo esc_html(str_replace('-','/',$date).($date===$today?'（今日）':''));?></option><?php endforeach;?></select></label><button type="submit">表示する</button></form>
+<?php if(!$rows || !$keys): ?>
+<div class="tw-empty"><strong>この日の待ち時間の記録はまだありません</strong><p>数値を取得できた時間帯から表示します。未取得だった過去の時間帯は、さかのぼって補えません。</p></div>
+<?php else: ?>
+<p>データ日時：<?php echo esc_html(str_replace('-','/',$day).' '.tdrt_db_hi($latest));?> ／ 日本時間・単位：分。</p>
+<?php $latest_dt=date_create_from_format('Y-m-d H:i:s',$latest,wp_timezone());if($is_today && tdrt_is_open($base) && $latest_dt && time()-$latest_dt->getTimestamp()>1200):?><p class="tw-average-note">最新データの取得が遅れています。下表は本日取得できた時点の記録です。</p><?php endif;?>
+<div class="tw-tools" hidden><label>施設名で絞り込む<input type="search" placeholder="<?php echo $greet?'例：ミッキー':($base==='tds'?'例：ソアリン':'例：プーさん');?>" autocomplete="off"></label><label>表示する時間帯<select><option value="all">1日全体</option><option value="recent">最後の4時間帯</option><option value="morning">午前（12時まで）</option><option value="day">昼（12〜17時）</option><option value="night">夕方・夜（17時以降）</option></select></label></div>
+<p class="tw-count" aria-live="polite"></p>
+<p>時間帯の各欄は、その30分間で最後に取得した値です。横にスワイプして朝から閉園まで比較できます。閉園後の欄は表示しません。</p>
+<p class="tw-average-note">施設名の下の平均は、選んだ日の30分ごとの記録値の単純平均（四捨五入）です。休止・未取得は除き、0分は含めます。時間帯を絞っても平均は変わりません。</p>
+<div class="tw-scroll-nav"><button type="button" data-direction="-1">← 早い時間</button><button type="button" data-direction="1">遅い時間 →</button></div>
+<div class="tw-scroll" tabindex="0" role="region" aria-label="施設別の待ち時間表・横スクロール可"><table>
+<caption style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)">本日の待ち時間。列は30分の時間帯、行は施設。施設名の下に平均を表示。</caption>
+<thead><tr><th scope="col"><?php echo $greet?'グリーティング':'アトラクション';?></th><?php foreach($keys as $k):$h=(int)substr((string)$k,8,2);$mi=(int)substr((string)$k,10,2);?><th scope="col" data-slot="<?php echo esc_attr($k);?>"><?php printf('%02d:%02d',$h,$mi);?><small class="tw-range"><?php printf('〜%02d:%02d',$h,$mi+29);?></small></th><?php endforeach;?></tr></thead>
+<tbody><?php foreach($names as $name):$mean=$means[$name];?><tr data-name="<?php echo esc_attr($name);?>"><th scope="row"><?php echo esc_html($name);?><small class="tw-row-mean tw-avg-<?php echo esc_attr($class($mean['avg']));?>">平均 <?php echo $mean['avg']===null?'—':esc_html($mean['avg']).'分';?></small><?php $delta=$trends[$name]??0;if($delta):?><small class="tw-trend <?php echo $delta>0?'tw-rise':'tw-fall';?>"><?php echo $delta>0?'急増中！':'狙い目！';?> <span>前回比<?php echo $delta>0?'+':'';echo (int)$delta;?>分</span></small><?php endif;?></th><?php foreach($keys as $k):$c=$m[$name][$k]??null;$w=$c['w']??null;$text=$w===null?tdrt_history_state_label($c['s']??'unknown'):(string)$w;?><td data-slot="<?php echo esc_attr($k);?>" class="<?php echo esc_attr($class($w));?>"><span class="<?php echo $w===null?'tw-state':'tw-value';?>"><?php echo str_replace('運営中止','<wbr>運営中止',esc_html($text));?></span></td><?php endforeach;?></tr><?php endforeach;?></tbody></table></div>
+<p class="tw-noresults" hidden>該当する施設・時間帯の記録がありません。</p>
+<div class="tw-legend" aria-label="色の目安"><span class="low">0〜19分</span><span class="mild">20〜49分</span><span class="busy">50〜79分</span><span class="high">80〜119分</span><span class="very-high">120〜179分</span><span class="peak">180分以上</span></div>
+<p>「急増中！」は前回比20分以上の増加、「狙い目！」は20分以上の減少が目安です。直近20分以内の連続した営業中の記録だけを比較し、休止明けや古いデータには表示しません。</p>
+<p>「終日運営中止」は公式の休止期間に該当する施設、「一時運営中止」は運営中ではない記録です。「案内終了」は、待ち時間の案内がなくなり、取得時刻に直前の待ち時間を足すと閉園時刻を超える場合の推定です。取得失敗や判断できる記録がない欄は「未取得」とし、0分と区別しています。表示は取得時点の待ち時間で、実際に並んだ時間ではありません。</p>
+<?php endif;?>
+<p>出典：<?php if(!$greet):?><a href="https://queue-times.com/" target="_blank" rel="noopener noreferrer">Queue-Times.com</a>・<?php endif;?><a href="https://www.tokyodisneyresort.jp/<?php echo esc_attr($base);?>/realtime/" target="_blank" rel="noopener noreferrer">東京ディズニーリゾート公式</a>。現在の案内は公式アプリでご確認ください。</p>
+<p>取得時刻を確認できる保存済みの記録を表示しています。</p>
+</section>
+<script>
+(function(){const root=document.getElementById(<?php echo wp_json_encode($id);?>);const tools=root.querySelector('.tw-tools');if(!tools)return;tools.hidden=false;
+const input=tools.querySelector('input'),select=tools.querySelector('select'),heads=[...root.querySelectorAll('thead [data-slot]')],rows=[...root.querySelectorAll('tbody tr')];
+const norm=s=>s.normalize('NFKC').toLocaleLowerCase();
+function update(){const mode=select.value,q=norm(input.value.trim());const slots=heads.map(h=>h.dataset.slot);const chosen=new Set(slots.filter((s,i)=>{const h=Number(s.slice(8,10));return mode==='all'||(mode==='recent'&&i>=slots.length-4)||(mode==='morning'&&h<12)||(mode==='day'&&h>=12&&h<17)||(mode==='night'&&h>=17)}));
+root.querySelectorAll('[data-slot]').forEach(c=>c.hidden=!chosen.has(c.dataset.slot));let n=0;rows.forEach(r=>{r.hidden=!norm(r.dataset.name).includes(q);if(!r.hidden)n++});root.querySelector('.tw-count').textContent=n+'施設 ／ '+chosen.size+'時間帯';root.querySelector('.tw-scroll').hidden=!n||!chosen.size;root.querySelector('.tw-noresults').hidden=!!n&&!!chosen.size;}
+root.querySelectorAll('[data-direction]').forEach(b=>b.addEventListener('click',()=>root.querySelector('.tw-scroll').scrollBy({left:Number(b.dataset.direction)*240,behavior:'smooth'})));
+input.addEventListener('input',update);select.addEventListener('change',update);update();})();
+</script>
 <?php return ob_get_clean();
 }
 add_shortcode('tdr_today_heatmap','tdrt_heatmap');
@@ -1050,6 +1427,12 @@ function tdrt_pass_today($a){
   $pl = $park==='tdl'?'東京ディズニーランド':'東京ディズニーシー';
   $pc = $park==='tdl'?'#1d4f91':'#0a8aa6';
   $today = wp_date('Y-m-d');
+  $last=(int)get_option('tdrt_realtime_last',0);
+  // Current pass availability must never be inferred from a previous day's snapshot.
+  if(!$last || $last<time()-1200 || $last>time()+60 || wp_date('Y-m-d',$last)!==$today){
+    return '<div class="tpt"><h3>🎫 DPA・スタンバイパス</h3><p>現在の発行状況は確認できていません。東京ディズニーリゾート公式アプリでご確認ください。</p><p style="font-size:12px">40周年記念プライオリティパスは2026年8月31日で終了しました。<a href="https://www.tokyodisneyresort.jp/tdr/news/update/tdr/202605" target="_blank" rel="noopener noreferrer">公式のお知らせ</a></p></div>';
+  }
+
   $ptbl = tdrt_pass_table();
   // 今日のイベントを取得
   $rows = $wpdb->get_results($wpdb->prepare(
@@ -1059,6 +1442,7 @@ function tdrt_pass_today($a){
   // attr_id -> [type -> [start_time, end_time]]
   $by_attr = [];
   foreach($rows as $r){
+    if($r->pass_type==='pp' && $today>='2026-09-01')continue;
     $aid = $r->attr_id;
     $by_attr[$aid]['name'] = tdrt_fix_name($r->attr_name);
     $by_attr[$aid][$r->pass_type][$r->event] = $r->event_time;
@@ -1087,7 +1471,7 @@ function tdrt_pass_today($a){
 .tpt .live{background:#fff8b3}
 .tpt .end-time{font-weight:700;color:#d0334d}
 .tpt .start-time{color:#666;font-size:11px}
-.tpt .none{color:#aaa;text-align:center;padding:20px}
+.tpt .tpt-empty{color:#aaa;text-align:center;padding:20px}
 .tpt .legend{font-size:11px;color:#666;margin:6px 0 12px}
 .tpt .legend .pass{margin-right:4px}
 </style>
@@ -1095,14 +1479,14 @@ function tdrt_pass_today($a){
 <h3>🎫 <?php echo esc_html($pl);?> パス発券状況</h3>
 <div class="legend">
   <span class="pass" style="background:#d63384">DPA</span>ディズニー・プレミアアクセス（有料）
-  <span class="pass" style="background:#0d6efd">PP</span>プライオリティパス（無料）
+
   <span class="pass" style="background:#198754">SP</span>スタンバイパス
 </div>
 <?php if(!$is_open): ?>
 <p style="color:#666;font-size:12px;text-align:center;padding:8px 12px;background:#f8f8f8;border-radius:6px;margin:8px 0">🌙 現在パークは営業時間外です。下記は本日の最終発券時刻（過去履歴）を表示しています。</p>
 <?php endif; ?>
 <?php if(empty($by_attr)): ?>
-<p class="none">本日のパス発券データはまだありません。<br><small>5〜30分間隔で自動収集中。</small></p>
+<p class="tpt-empty">本日の発行記録はまだありません。現在の案内は公式アプリでご確認ください。</p>
 <?php else: ?>
 <table>
 <thead><tr><th>アトラクション</th><th>種別</th><th>発券開始</th><th>発券終了</th><th>状況</th></tr></thead>
@@ -1114,7 +1498,7 @@ foreach($by_attr as $aid=>$data){
   $name = $data['name'];
   // v1.5.4: 休止中のアトラクションを除外
   if(isset($stopped_names[$name])) continue;
-  foreach(['dpa','pp','sbp'] as $tp){
+  foreach(['dpa','sbp'] as $tp){
     if(!isset($data[$tp])) continue;
     $start = $data[$tp]['start'] ?? null;
     $end   = $data[$tp]['end']   ?? null;
@@ -1147,7 +1531,7 @@ foreach($sorted as $row):
 </table>
 <?php endif;?>
 <?php $last = (int) get_option('tdrt_realtime_last', 0); if($last):?>
-<p style="font-size:11px;color:#888;margin-top:6px;text-align:right">最終更新: <?php echo esc_html(wp_date('H:i', $last));?></p>
+<p style="font-size:11px;color:#888;margin-top:6px;text-align:right">最終更新: <?php echo esc_html(wp_date('n月j日 H:i', $last));?></p>
 <?php endif;?>
 </div>
 <?php return ob_get_clean();
@@ -1451,7 +1835,7 @@ add_action('rest_api_init', function(){
             'status'   => $r['status'] ?? 'operating',
           ];
         }
-        $waits_payload = serialize(['rows'=>$waits_compat, 'ts'=>time()]);
+        $waits_payload = serialize(['rows'=>$waits_compat, 'ts'=>time(), 'source'=>'official-fetcher']);
         $waits_key = 'tdrt_waits_'.$park;
         $wexisting = $wpdb->get_var($wpdb->prepare("SELECT option_id FROM {$wpdb->options} WHERE option_name = %s", $waits_key));
         if($wexisting){
@@ -1570,6 +1954,7 @@ add_action('rest_api_init', function(){
           $wpdb->insert($wpdb->options, ['option_name'=>$opt_key,'option_value'=>$serialized,'autoload'=>'no'], ['%s','%s','%s']);
         }
         wp_cache_delete($opt_key, 'options');
+        update_option('tdrt_greet_observed_'.$park,time(),false);
         $stored[$park] = count($clean);
       }
       return ['ok'=>true, 'stored'=>$stored, 'now'=>time()];
@@ -1758,6 +2143,10 @@ add_action('rest_api_init', function(){
       $tds_snap_count = is_array($tds_snap) ? count($tds_snap) : 0;
       $tdl_snap_sample = is_array($tdl_snap) ? array_slice($tdl_snap, 0, 3) : [];
       return [
+        'wait_sources' => array_map(function($p){$v=get_option('tdrt_waits_'.$p,[]);return ['source'=>$v['source']??null,'fetched_at'=>isset($v['ts'])?wp_date('Y-m-d H:i:s',(int)$v['ts']):null,'fresh_count'=>count(tdrt_fresh_waits($v,time()))];},['tdl','tds']),
+        'verified_waits_from' => tdrt_verified_from(),
+        'greeting_fetch' => get_option('tdrt_greet_fetch_last',[]),
+        'wait_history_counts' => $wpdb->get_results("SELECT park,COUNT(*) AS n,MIN(recorded_at) AS first_at,MAX(recorded_at) AS last_at FROM ".tdrt_table()." GROUP BY park",ARRAY_A),
         'today' => $today_ymd,
         'now' => wp_date('Y-m-d H:i:s'),
         'wp_tz' => wp_timezone_string(),
@@ -1775,4 +2164,15 @@ add_action('rest_api_init', function(){
       ];
     },
   ]);
+});
+
+// ===== 301リダイレクト（ページ統合） =====
+// 旧ホテル空室比較ページ → お得情報ハブ（2026-07-08統合。GSC6ヶ月クリック0のため役割をハブへ集約）
+add_action('template_redirect', function(){
+  $path = trim((string)parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH), '/');
+  $map = [
+    'disney-hotel-vacancy-compare-2' => 'https://yasushi-duffy.com/disney-otoku-sale/',
+    'disney-hotel-vacancy-compare'   => 'https://yasushi-duffy.com/disney-otoku-sale/',
+  ];
+  if (isset($map[$path])) { wp_redirect($map[$path], 301); exit; }
 });

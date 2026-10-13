@@ -970,6 +970,51 @@ def ingest_park_hours(hours: dict[str, dict[str, str]]) -> dict[str, Any]:
     return {"endpoint": "park-hours", "status": r.status_code, **body}
 
 
+def ingest_closures(source: str, items: list[dict]) -> dict[str, Any]:
+    """Replace the complete official closure snapshot, separately from news IDs."""
+    park = source.removeprefix("stop_")
+    if not items:
+        return {"error": "empty_closure_snapshot", "park": park}
+    if DRY_RUN:
+        return {"dry_run": True, "park": park, "count": len(items)}
+    try:
+        r = requests.post(
+            f"{WP_BASE}/wp-json/tdr-today/v1/closures",
+            headers={"X-TDR-Token": TOKEN, "Content-Type": "application/json"},
+            json={"park": park, "items": items}, timeout=90,
+        )
+        body = r.json()
+        if not isinstance(body, dict):
+            return {"error": "invalid_closure_response", "status": r.status_code, "park": park}
+        if r.status_code >= 400 or not body.get("ok") or body.get("count") != len(items):
+            return {"error": "closure_save_failed", "status": r.status_code,
+                    "code": body.get("code"), "park": park}
+        return {"ok": True, "park": park, "count": body["count"], "status": r.status_code}
+    except (requests.RequestException, ValueError) as e:
+        # An unknown write outcome is not resent automatically.
+        return {"error": "closure_save_unknown", "park": park, "type": type(e).__name__}
+
+
+def deduplicate_items(source: str, items: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for item in items:
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        unique.append(item)
+        if len(unique) >= 30 and source not in {"stop_tdl", "stop_tds"}:
+            break
+    return unique
+
+
+def failed_sources(summary: dict[str, Any]) -> list[str]:
+    """Authentication/HTTP failures must fail the job even if other sources work."""
+    return [key for key, value in summary.items()
+            if isinstance(value, dict) and
+            (value.get("error") or int(value.get("status") or 200) >= 400)]
+
+
 def ingest(source: str, items: list[dict]) -> dict[str, Any]:
     """POST a batch of news/stop items to /wp-json/tdr-mon/v1/ingest.
 
@@ -1049,18 +1094,12 @@ def main() -> int:
             except Exception as e:
                 summary[key] = {"error": f"parse: {e}", "html_len": len(html)}
                 continue
-            seen_ids: set[str] = set()
-            unique: list[dict] = []
-            for it in items:
-                if it["id"] in seen_ids:
-                    continue
-                seen_ids.add(it["id"])
-                unique.append(it)
-                if len(unique) >= 30:
-                    break
+            unique = deduplicate_items(key, items)
             print(f"[parse] {key} items={len(unique)}", file=sys.stderr)
             res = ingest(key, unique)
             summary[key] = res
+            if key in {"stop_tdl", "stop_tds"}:
+                summary["closures_" + key.removeprefix("stop_")] = ingest_closures(key, unique)
             # X 投稿は後回し（first-run-seed 後に一括処理）
             for it in unique:
                 it["source"] = key
@@ -1256,9 +1295,9 @@ def main() -> int:
     summary["snapshot"] = trigger_snapshot()
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
-    failed = [k for k, v in summary.items() if "error" in v]
+    failed = failed_sources(summary)
     total_sources = len(SOURCES) + 1  # +1 for prtimes
-    return 1 if len(failed) == total_sources else 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
