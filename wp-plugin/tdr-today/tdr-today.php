@@ -596,6 +596,14 @@ function tdrt_items_by_src($srcs,$lim=100){
   return $out;
 }
 
+// Live park pages must not retain an old closure list in page/browser caches.
+add_action('template_redirect',function(){
+  if(is_page(['today-tdl','today-tds'])){
+    if(!defined('DONOTCACHEPAGE'))define('DONOTCACHEPAGE',true);
+    nocache_headers();
+  }
+},0);
+
 // Official closure snapshots replace historical news records, never merge with them.
 function tdrt_closure_health($park){
   $v=get_option('tdrt_closures_'.$park,[]);
