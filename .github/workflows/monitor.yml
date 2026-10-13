@@ -19,9 +19,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  fetch:
+  closures:
     runs-on: ubuntu-latest
     timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install python deps
+        run: pip install -r requirements.txt
+      - name: Validate closure synchronization
+        run: |
+          python -m unittest discover -s tests -p 'test_*.py'
+          php -l wp-plugin/tdr-today/tdr-today.php
+          php tests/test_closures.php
+      - uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+      - name: Install browser runtime
+        run: |
+          python -m playwright install-deps chromium
+          python -m playwright install chromium
+      - name: Synchronize complete closure lists
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
+          PW_CHANNEL: chrome
+          CLOSURES_ONLY: '1'
+          X_AUTO_POST: '0'
+        run: python fetcher.py
+  fetch:
+    needs: closures
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -32,12 +64,6 @@ jobs:
 
       - name: Install python deps
         run: pip install -r requirements.txt
-
-      - name: Validate closure synchronization
-        run: |
-          python -m unittest discover -s tests -p 'test_*.py'
-          php -l wp-plugin/tdr-today/tdr-today.php
-          php tests/test_closures.php
 
       - name: Setup Google Chrome
         uses: browser-actions/setup-chrome@v1
@@ -63,6 +89,7 @@ jobs:
           WP_BASE: ${{ secrets.WP_BASE }}
           WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
           PW_CHANNEL: chrome
+          SKIP_CLOSURES: '1'
           # Restore park data without sending X posts during recovery.
           X_AUTO_POST: '0'
           X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}

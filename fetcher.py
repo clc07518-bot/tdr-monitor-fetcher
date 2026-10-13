@@ -1079,7 +1079,14 @@ def main() -> int:
             except Exception as e:
                 print(f"[warn] stealth_sync failed: {e}", file=sys.stderr)
 
+        closures_only = os.environ.get("CLOSURES_ONLY", "0") == "1"
+        skip_closures = os.environ.get("SKIP_CLOSURES", "0") == "1"
+        if closures_only and skip_closures:
+            raise ValueError("Conflicting closure execution modes")
         for key, (url, wait_sel) in SOURCES.items():
+            is_closure = key in {"stop_tdl", "stop_tds"}
+            if (closures_only and not is_closure) or (skip_closures and is_closure):
+                continue
             print(f"[fetch] {key} {url}", file=sys.stderr)
             t0 = time.time()
             try:
@@ -1096,6 +1103,9 @@ def main() -> int:
                 continue
             unique = deduplicate_items(key, items)
             print(f"[parse] {key} items={len(unique)}", file=sys.stderr)
+            if closures_only:
+                summary["closures_" + key.removeprefix("stop_")] = ingest_closures(key, unique)
+                continue
             res = ingest(key, unique)
             summary[key] = res
             if key in {"stop_tdl", "stop_tds"}:
@@ -1104,6 +1114,11 @@ def main() -> int:
             for it in unique:
                 it["source"] = key
             items_by_source.setdefault(key, []).extend(unique)
+
+        if closures_only:
+            browser.close()
+            print(json.dumps(summary, ensure_ascii=False, indent=2))
+            return 1 if failed_sources(summary) else 0
 
         # Park calendar (today's TDL/TDS hours)
         try:
