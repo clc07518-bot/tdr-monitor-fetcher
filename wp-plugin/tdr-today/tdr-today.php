@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling + チケット価格表示。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.5.11
+Version: 1.5.12
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -803,80 +803,125 @@ function tdrt_is_offday($date_ymd){
 // 本日販売中の全チケット種別を返す。
 // 戻り値: 配列。各要素は ['name','badge','prices'=>['adult','junior','child'],'is_fixed','condition','link','available']
 // 価格変動チケットは prices['adult'] 等を null にして変動表示に切り替える。
-function tdrt_get_all_ticket_types($park){
-  $today_ymd_dash = wp_date('Y-m-d');
-  $is_weekday = tdrt_is_weekday($today_ymd_dash);
-  $is_offday  = tdrt_is_offday($today_ymd_dash);
-  $is_summer  = (function($d){
-    return ($d >= '2026-07-01' && $d <= '2026-09-14');
-  })($today_ymd_dash);
-
-  $base = tdrt_get_ticket_price($park); // 全格納（types を含む可能性あり）
-  $types = (is_array($base) && isset($base['types']) && is_array($base['types'])) ? $base['types'] : [];
-  // フォールバック: general を base から組み立て (旧形式互換)
-  if(!isset($types['general']) && is_array($base)){
-    $g = [];
-    foreach(['adult','junior','child'] as $k){
-      if(isset($base[$k])) $g[$k] = (int)$base[$k];
+// Only official, date-specific sale records may enter today's ticket list.
+// No price-only fallback or hardcoded list of ticket names (including limited offers).
+function tdrt_store_ticket_sales($park,$snapshot){
+  $date=wp_date('Ymd');
+  if(!in_array($park,['tdl','tds'],true) || !is_array($snapshot)
+    || (string)($snapshot['date'] ?? '')!==$date || ($snapshot['park'] ?? '')!==$park
+    || ($snapshot['source'] ?? '')!=='https://www.tokyodisneyresort.jp/ticket/index.html'
+    || !is_array($snapshot['items'] ?? null) || empty($snapshot['seen'])) return false;
+  $checked=(int)($snapshot['checked_at'] ?? 0);
+  if($checked>time()+60 || $checked<time()-1800) return false;
+  $rows=[];
+  foreach($snapshot['items'] as $ticket){
+    if(!is_array($ticket) || !in_array($ticket['sale_status'] ?? '',['販売中','残りわずか'],true)) return false;
+    $name=sanitize_text_field($ticket['name'] ?? ''); $prices=[];
+    foreach(['adult','junior','child'] as $cat){
+      if(isset($ticket['prices'][$cat]) && is_numeric($ticket['prices'][$cat])){
+        $amount=(int)$ticket['prices'][$cat];
+        if($amount>0 && $amount<=100000) $prices[$cat]=$amount;
+      }
     }
-    if(!empty($g)) $types['general'] = $g;
+    if($name==='' || !$prices) return false;
+    $condition='購入条件・入園時間は公式サイトをご確認ください';
+    if(strpos($name,'アフター5')!==false) $condition='17時から入園（対象日・購入条件は公式をご確認ください）';
+    elseif(strpos($name,'アフター3')!==false) $condition='15時から入園（対象日・購入条件は公式をご確認ください）';
+    elseif(strpos($name,'障がい')!==false) $condition='対象の証明書をお持ちの方および同伴者1名';
+    $rows[]=['name'=>$name,'badge'=>sanitize_text_field($ticket['badge'] ?? '当日券'),'prices'=>$prices,
+      'is_fixed'=>false,'condition'=>$condition,'link'=>'https://www.tokyodisneyresort.jp/ticket/index.html?park='.$park,
+      'available'=>true,'sale_status'=>$ticket['sale_status']];
   }
+  $value=['date'=>$date,'checked_at'=>$checked,'items'=>$rows,'unknown'=>(int)($snapshot['unknown'] ?? 0)];
+  // Use the existing host-compatible SQL persistence path, then invalidate object cache.
+  $key='tdrt_ticket_sales_v2_'.$date.'_'.$park;
+  global $wpdb;
+  $old=$wpdb->get_var($wpdb->prepare("SELECT option_value FROM {$wpdb->options} WHERE option_name=%s",$key));
+  $old_value=$old ? maybe_unserialize($old) : null;
+  if(is_array($old_value) && (int)($old_value['checked_at'] ?? 0)>$checked) return true;
+  if($old!==null) $wpdb->update($wpdb->options,['option_value'=>serialize($value),'autoload'=>'no'],['option_name'=>$key]);
+  else $wpdb->insert($wpdb->options,['option_name'=>$key,'option_value'=>serialize($value),'autoload'=>'no']);
+  wp_cache_delete($key,'options');
+  return get_option($key,null)===$value;
+}
 
-  // 各券種の定義 (公式モーダル名 → 内部キー → メタ情報)
-  $defs = [
-    ['key'=>'general',       'name'=>'1デーパスポート',                                                                                       'badge'=>'1日券',         'condition'=>'全日販売',                              'link'=>'https://www.tokyodisneyresort.jp/ticket/index.html?park='.$park],
-    ['key'=>'shougai',       'name'=>'1デーパスポート（障がいのある方向け）',                                                              'badge'=>'1日券',         'condition'=>'対象の証明書をお持ちの方および同伴者1名', 'link'=>'https://www.tokyodisneyresort.jp/tdr/bfree/bfree_ticket.html'],
-    ['key'=>'shutoken',      'name'=>'首都圏ウィークデーパスポート',                                                                       'badge'=>'期間限定',      'condition'=>'首都圏8都県在住者・平日（祝除く）',     'link'=>'https://www.tokyodisneyresort.jp/dream/event/shutoken2026.html'],
-    ['key'=>'hopper',        'name'=>'1デーパークホッパーパスポート',                                                                      'badge'=>'期間限定',      'condition'=>'11時から両パーク行き来可',                'link'=>'https://www.tokyodisneyresort.jp/ticket/park_hopper.html'],
-    ['key'=>'fanfunful',     'name'=>'ファンダフル・ディズニー・パスポート',                                                              'badge'=>'対象日限定',    'condition'=>'ファンダフル・ディズニー会員のみ',       'link'=>'https://www.tokyodisneyresort.jp/treasure/fantasy/fanclub/index.php'],
-    ['key'=>'early_evening', 'name'=>($is_summer ? 'アフター3サマーパスポート' : 'アーリーイブニングパスポート'),                       'badge'=>($is_summer ? '期間限定（夏期）' : '入園時間指定'), 'condition'=>'休日（土日祝）の15時〜入園',           'link'=>'https://www.tokyodisneyresort.jp/ticket/index.html?park='.$park],
-    ['key'=>'weeknight',     'name'=>($is_summer ? 'アフター5サマーパスポート' : 'ウィークナイトパスポート'),                              'badge'=>($is_summer ? '期間限定（夏期）' : '入園時間指定'), 'condition'=>'平日（祝除く）17時〜入園',              'link'=>'https://www.tokyodisneyresort.jp/ticket/index.html?park='.$park],
-  ];
-
-  $list = [];
-  foreach($defs as $d){
-    $key = $d['key'];
-    // 今日の公式モーダルに含まれていない = 今日販売対象外 → スキップ
-    if(!isset($types[$key])) continue;
-    $prices = $types[$key];
-    // adult/junior/child いずれかが揃っていなければ無視
-    if(empty($prices['adult'])) continue;
-    $list[] = [
-      'name'      => $d['name'],
-      'badge'     => $d['badge'],
-      'prices'    => $prices,
-      'is_fixed'  => false,
-      'condition' => $d['condition'],
-      'link'      => $d['link'],
-      'available' => true,
-    ];
+function tdrt_ticket_sales_snapshot(){
+  $date=wp_date('Ymd'); $snapshot=['date'=>$date,'checked_at'=>0,'parks'=>[]];
+  foreach(['tdl','tds'] as $park){
+    $value=get_option('tdrt_ticket_sales_v2_'.$date.'_'.$park,null);
+    // Never carry yesterday's inventory or stale prices forward as "on sale".
+    if(!is_array($value) || ($value['date'] ?? '')!==$date || time()-(int)$value['checked_at']>1800) continue;
+    $snapshot['parks'][$park]=$value;
   }
+  return $snapshot;
+}
 
-  // ファンダフル・ディズニー・パスポート: 対象日フォールバック（2026-06-12追加）
-  // 公式モーダルから取得できない日でも、対象日なら通常1デー価格から自動計算して表示する。
-  // 対象日: 2026-04-06〜2026-09-11（公式ファンクラブ passport_2604-06 / passport_2607-09 で確認）
-  // 料金: 通常1デーより 大人-500円 / 中人-400円 / 小人-300円。期が変わったら対象日を更新すること。
-  $ff_listed = false;
-  foreach($list as $ffl){ if(strpos($ffl['name'], 'ファンダフル') !== false){ $ff_listed = true; break; } }
-  if(!$ff_listed && isset($types['general']['adult'])
-     && $today_ymd_dash >= '2026-04-06' && $today_ymd_dash <= '2026-09-11'){
-    $ffg = $types['general'];
-    $list[] = [
-      'name'      => 'ファンダフル・ディズニー・パスポート',
-      'badge'     => '対象日限定',
-      'prices'    => [
-        'adult'  => (int)$ffg['adult'] - 500,
-        'junior' => isset($ffg['junior']) ? (int)$ffg['junior'] - 400 : null,
-        'child'  => isset($ffg['child']) ? (int)$ffg['child'] - 300 : null,
-      ],
-      'is_fixed'  => false,
-      'condition' => 'ファンダフル・ディズニー会員限定・通常1デーより大人500円/中人400円/小人300円おトク',
-      'link'      => 'https://www.tokyodisneyresort.jp/treasure/fantasy/fanclub/index.php',
-      'available' => true,
-    ];
-  }
+function tdrt_render_ticket_sales($park){
+  $pc = ($park==='tds') ? '#176b87' : '#a13e57';
+  ob_start();
+?>
+<?php
+// v1.5.5: 今日のページなので、公式モーダルから取得した「今日の確定価格」のみ表示。
+// 当日の公式販売マークが確認できた券種のみ。旧価格データから推定しない。
+$all_tickets = tdrt_get_all_ticket_types($park);
+$ticket_today = array_values(array_filter($all_tickets, function($t){ return !empty($t['available']) && !empty($t['prices']); }));
+$ticket_snapshot = tdrt_ticket_sales_snapshot();
+$ticket_verified = isset($ticket_snapshot['parks'][$park]);
+?>
+<h3>💴 今日販売のチケット</h3>
+<?php if($ticket_today): ?>
+<div style="font-size:13px;background:#fff;margin:8px 0">
+<?php
+$cat_labels = ['adult'=>'大人','junior'=>'中人','child'=>'小人'];
+$cat_subs   = ['adult'=>'18才以上','junior'=>'中学・高校生','child'=>'4才〜小学生'];
+foreach($ticket_today as $t):
+  $prices = $t['prices'] ?? null;
+?>
+<div style="border:1px solid #e0e0e0;border-radius:8px;padding:10px 12px;margin-bottom:10px;background:#fafafa">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+    <span style="font-size:10px;background:<?php echo $pc;?>;color:#fff;padding:2px 8px;border-radius:10px;font-weight:600"><?php echo esc_html($t['badge']);?></span>
+    <strong style="font-size:14px;color:#222"><?php echo esc_html($t['name']);?></strong>
+  </div>
+  <p style="margin:4px 0;color:#255d48;font-weight:700"><?php echo esc_html($t['sale_status']);?></p>
+  <table style="width:100%;border-collapse:collapse;font-size:12px;margin:6px 0">
+    <thead><tr style="background:#f0f0f1">
+      <?php foreach($cat_labels as $k=>$lbl): ?><th style="padding:6px;border:1px solid #e0e0e0;text-align:center"><?php echo esc_html($lbl);?><br><small style="color:#888;font-weight:400"><?php echo esc_html($cat_subs[$k]);?></small></th><?php endforeach; ?>
+    </tr></thead>
+    <tbody><tr>
+      <?php foreach(['adult','junior','child'] as $k):
+        if($prices && isset($prices[$k])): ?>
+          <td style="padding:8px;border:1px solid #e0e0e0;text-align:center;font-weight:700;color:<?php echo $pc;?>;font-size:15px">¥<?php echo number_format((int)$prices[$k]);?></td>
+        <?php else: ?>
+          <td style="padding:8px;border:1px solid #e0e0e0;text-align:center;color:#aaa">—</td>
+        <?php endif;
+      endforeach; ?>
+    </tr></tbody>
+  </table>
+  <div style="font-size:11px;color:#888;margin-top:4px">
+    <?php echo esc_html($t['condition']);?>
+    <?php if(!empty($t['link'])): ?> · <a href="<?php echo esc_url($t['link']);?>" target="_blank" rel="noopener" style="color:<?php echo $pc;?>">詳細 →</a><?php endif; ?>
+  </div>
+</div>
+<?php endforeach; ?>
+</div>
+<?php elseif($ticket_verified): ?>
+<p>現在、販売中と確認できるチケットはありません。</p>
+<?php else: ?>
+<p>現在の販売状況を確認できません。<a href="https://www.tokyodisneyresort.jp/ticket/index.html">公式のチケット販売状況</a>をご確認ください。</p>
+<?php endif; ?>
+<?php if($ticket_verified): ?>
+<p style="font-size:12px;color:#555;margin:4px 0 12px">公式確認：<?php echo esc_html(wp_date('n/j H:i',$ticket_snapshot['parks'][$park]['checked_at']));?>時点。販売中・残りわずかの券種のみ掲載しています。売り切れ・販売対象外の券種は表示しません。販売状況は変動するため、購入直前に公式サイトをご確認ください。</p>
+<?php if(!empty($ticket_snapshot['parks'][$park]['unknown'])): ?><p style="font-size:12px;color:#555">一部券種の販売状況は確認できていません。詳細は公式サイトをご確認ください。</p><?php endif; ?>
+<?php endif; ?>
 
-  return $list;
+<?php
+  return ob_get_clean();
+}
+
+function tdrt_get_all_ticket_types($park){
+  $snapshot=tdrt_ticket_sales_snapshot();
+  if(!is_array($snapshot) || ($snapshot['date'] ?? '')!==wp_date('Ymd')) return [];
+  return $snapshot['parks'][$park]['items'] ?? [];
 }
 
 // Timestamped sources only. Never substitute unversioned DWR last/previous values.
@@ -1135,49 +1180,34 @@ foreach($shows as $sh):
 </ul>
 <?php endif; ?>
 
-<?php
-// v1.5.5: 今日のページなので、公式モーダルから取得した「今日の確定価格」のみ表示。
-// types に含まれない券種 = 今日販売対象外なので非表示にする。
-$all_tickets = tdrt_get_all_ticket_types($park);
-$ticket_today = array_values(array_filter($all_tickets, function($t){ return !empty($t['available']) && !empty($t['prices']['adult']); }));
-if($ticket_today):
-?>
-<h3>💴 今日販売のチケット</h3>
-<div style="font-size:13px;background:#fff;margin:8px 0">
-<?php
-$cat_labels = ['adult'=>'大人','junior'=>'中人','child'=>'小人'];
-$cat_subs   = ['adult'=>'18才以上','junior'=>'中学・高校生','child'=>'4才〜小学生'];
-foreach($ticket_today as $t):
-  $prices = $t['prices'] ?? null;
-?>
-<div style="border:1px solid #e0e0e0;border-radius:8px;padding:10px 12px;margin-bottom:10px;background:#fafafa">
-  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-    <span style="font-size:10px;background:<?php echo $pc;?>;color:#fff;padding:2px 8px;border-radius:10px;font-weight:600"><?php echo esc_html($t['badge']);?></span>
-    <strong style="font-size:14px;color:#222"><?php echo esc_html($t['name']);?></strong>
-  </div>
-  <table style="width:100%;border-collapse:collapse;font-size:12px;margin:6px 0">
-    <thead><tr style="background:#f0f0f1">
-      <?php foreach($cat_labels as $k=>$lbl): ?><th style="padding:6px;border:1px solid #e0e0e0;text-align:center"><?php echo esc_html($lbl);?><br><small style="color:#888;font-weight:400"><?php echo esc_html($cat_subs[$k]);?></small></th><?php endforeach; ?>
-    </tr></thead>
-    <tbody><tr>
-      <?php foreach(['adult','junior','child'] as $k):
-        if($prices && isset($prices[$k])): ?>
-          <td style="padding:8px;border:1px solid #e0e0e0;text-align:center;font-weight:700;color:<?php echo $pc;?>;font-size:15px">¥<?php echo number_format((int)$prices[$k]);?></td>
-        <?php else: ?>
-          <td style="padding:8px;border:1px solid #e0e0e0;text-align:center;color:#aaa">—</td>
-        <?php endif;
-      endforeach; ?>
-    </tr></tbody>
-  </table>
-  <div style="font-size:11px;color:#888;margin-top:4px">
-    <?php echo esc_html($t['condition']);?>
-    <?php if(!empty($t['link'])): ?> · <a href="<?php echo esc_url($t['link']);?>" target="_blank" rel="noopener" style="color:<?php echo $pc;?>">詳細 →</a><?php endif; ?>
-  </div>
-</div>
-<?php endforeach; ?>
-</div>
-<p style="font-size:11px;color:#888;margin:4px 0 12px">※ 公式チケット販売状況カレンダーから自動取得した本日の確定価格です。</p>
-<?php endif; ?>
+<?php $ticket_live_id='tdrt-ticket-sales-'.$park; ?>
+<section id="<?php echo esc_attr($ticket_live_id); ?>" data-ticket-sales>
+<?php echo tdrt_render_ticket_sales($park); ?>
+</section>
+<script>
+(function(){
+  const box=document.getElementById(<?php echo wp_json_encode($ticket_live_id); ?>);
+  if(!box) return;
+  const endpoint=<?php echo wp_json_encode(rest_url('tdr-today/v1/ticket-sales').'?park='.$park); ?>;
+  let busy=false;
+  async function refresh(){
+    if(busy || document.hidden) return;
+    busy=true;
+    try{
+      const response=await fetch(endpoint+'&_cb='+Date.now(),{cache:'no-store',credentials:'same-origin'});
+      if(!response.ok) throw new Error('ticket availability unavailable');
+      const data=await response.json();
+      if(typeof data.html!=='string') throw new Error('ticket response invalid');
+      box.innerHTML=data.html;
+    }catch(error){
+      box.innerHTML='<h3>💴 今日販売のチケット</h3><p>現在の販売状況を確認できません。<a href="https://www.tokyodisneyresort.jp/ticket/index.html">公式のチケット販売状況</a>をご確認ください。</p>';
+    }finally{ busy=false; }
+  }
+  refresh();
+  setInterval(refresh,60000);
+  document.addEventListener('visibilitychange',function(){if(!document.hidden)refresh();});
+})();
+</script>
 
 <?php
 // 🎫 DPA/プライオリティパス発券状況 を hub 内に統合表示。
@@ -2099,6 +2129,9 @@ add_action('rest_api_init', function(){
             }
             if(!empty($types)) $row['types'] = $types;
           }
+          if(isset($body[$park]['sales_snapshot'])){
+            $row['sales_saved']=tdrt_store_ticket_sales($park,$body[$park]['sales_snapshot']);
+          }
           if(!empty($row)) $out[$park] = $row;
         }
       }
@@ -2183,4 +2216,32 @@ add_action('template_redirect', function(){
     'disney-hotel-vacancy-compare'   => 'https://yasushi-duffy.com/disney-otoku-sale/',
   ];
   if (isset($map[$path])) { wp_redirect($map[$path], 301); exit; }
+});
+
+// Public, read-only live availability; separate from page/cache and legacy price ingest.
+add_action('rest_api_init',function(){
+  register_rest_route('tdr-today/v1','/ticket-sales',[
+    'methods'=>'GET','permission_callback'=>'__return_true',
+    'callback'=>function($request){
+      $park=(string)$request->get_param('park');
+      if(!in_array($park,['tdl','tds'],true)) return new WP_Error('bad_park','invalid park',['status'=>400]);
+      $html=tdrt_render_ticket_sales($park);
+      $snapshot=tdrt_ticket_sales_snapshot();
+      $response=new WP_REST_Response(['date'=>wp_date('Ymd'),'verified'=>isset($snapshot['parks'][$park]),
+        'checked_at'=>$snapshot['parks'][$park]['checked_at'] ?? null,'html'=>$html],200);
+      $response->header('Cache-Control','no-store, no-cache, must-revalidate, max-age=0');
+      return $response;
+    }
+  ]);
+});
+
+add_action('rest_api_init',function(){
+  register_rest_route('tdr-today/v1','/ticket-sales',[
+    'methods'=>'POST','permission_callback'=>function(){return current_user_can('manage_options');},
+    'callback'=>function($request){
+      $body=$request->get_json_params(); $park=(string)($body['park'] ?? '');
+      if(!tdrt_store_ticket_sales($park,$body)) return new WP_Error('invalid_sales','invalid or stale sale snapshot',['status'=>400]);
+      return ['ok'=>true,'park'=>$park,'count'=>count($body['items']),'checked_at'=>$body['checked_at']];
+    }
+  ]);
 });
