@@ -514,6 +514,58 @@ def parse_park_calendar(html: str) -> dict[str, dict[str, str]]:
     return result
 
 
+
+def parse_ticket_sale_snapshot(html, park, date, checked_at=None):
+    """Official date/park inventory, including unknown future ticket names.
+
+    Positive sale marks only; a price alone is never evidence of availability.
+    An invalid/missing day raises instead of being converted to "sold out".
+    """
+    import json, re, time
+    from html import unescape
+    match = re.search(r"(?:var|let|const)\s+ticketPopup\s*=\s*", html)
+    if not match or park not in ("tdl", "tds"):
+        raise ValueError("official ticket inventory unavailable")
+    data, _ = json.JSONDecoder().raw_decode(html[match.end():])
+    day = data.get(str(date), {}).get(park)
+    if not isinstance(day, dict) or str(day.get("date")) != str(date) or not isinstance(day.get("info"), dict):
+        raise ValueError("official ticket date/park mismatch")
+    items, seen, unknown = [], 0, 0
+    for group in day["info"].values():
+        for ticket in group.get("list", {}).values():
+            seen += 1
+            marker = ticket.get("ticket", {})
+            classes = set(str(marker.get("classPopup", "")).split())
+            if classes not in ({"conversion"}, {"conversion", "is-few"}):
+                unknown += 1
+                continue
+            if marker.get("passFlg"):
+                continue
+            prices = {}
+            price_text = unescape(re.sub(r"<[^>]+>", "", str(ticket.get("ageText", ""))))
+            for key, label in (("adult", "大人"), ("junior", "中人"), ("child", "小人")):
+                m = re.search(label + r"[：:]\s*[¥￥]([0-9,]+)", price_text)
+                if m and 0 < int(m[1].replace(",", "")) <= 100000:
+                    prices[key] = int(m[1].replace(",", ""))
+            name = unescape(re.sub(r"<[^>]+>", "", str(ticket.get("name", "")))).strip()
+            if not name or not prices:
+                unknown += 1
+                continue
+            items.append({"name": name, "badge": group.get("name", "当日券"),
+                          "prices": prices, "sale_status": "残りわずか" if "is-few" in classes else "販売中"})
+    if not seen:
+        raise ValueError("official ticket inventory empty")
+    return {"date": str(date), "park": park, "checked_at": int(checked_at or time.time()),
+            "source": "https://www.tokyodisneyresort.jp/ticket/index.html", "items": items,
+            "seen": seen, "unknown": unknown}
+
+
+def fetch_ticket_sale_snapshot(page, park, date):
+    page.goto(f"https://www.tokyodisneyresort.jp/ticket/index/{date[:6]}/?park={park}",
+              wait_until="domcontentloaded", timeout=30000)
+    page.wait_for_function("() => [...document.scripts].some(s => /(?:var|let|const)\\s+ticketPopup\\s*=/.test(s.textContent))", timeout=20000)
+    return parse_ticket_sale_snapshot(page.content(), park, date)
+
 TICKET_TYPE_MAP = {
     "1デーパスポート（障がいのある方向け）": "shougai",
     "1デーパークホッパーパスポート": "hopper",
@@ -1144,6 +1196,12 @@ def main() -> int:
                 print(f"[parse] shows {park}: {len(shows[park])} items", file=sys.stderr)
                 # Reuse the same HTML to extract today's 1-day passport prices (fallback).
                 tp = parse_ticket_price(html_show) or {}
+                # Separate verified sale inventory from price-only legacy data.
+                try:
+                    tp["sales_snapshot"] = fetch_ticket_sale_snapshot(page, park, today_ymd_jst)
+                    print(f"[parse] verified ticket sales {park}: {len(tp['sales_snapshot']['items'])}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[warn] ticket sale inventory {park}: {e}", file=sys.stderr)
                 # Fetch full per-type prices via the official ticket calendar modal.
                 try:
                     full_prices = fetch_full_ticket_prices(page, park, today_ymd_jst)
@@ -1317,3 +1375,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
