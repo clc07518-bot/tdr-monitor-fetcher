@@ -1505,9 +1505,10 @@ function tdrt_render_pass_today($a){
 .tpt table{width:100%;border-collapse:collapse;font-size:12px;background:#fff}
 .tpt th,.tpt td{border:1px solid #e0e0e0;padding:6px 8px;text-align:left;vertical-align:middle}
 .tpt thead th{background:#2a2a3a;color:#fff;font-weight:600;font-size:11px;text-align:center}
-.tpt .pass{display:inline-block;padding:2px 6px;border-radius:3px;color:#fff;font-size:10px;font-weight:700;margin-right:4px}
+.tpt .pass{white-space:nowrap;display:inline-block;padding:2px 6px;border-radius:3px;color:#fff;font-size:10px;font-weight:700;margin-right:4px}
 .tpt .ended{opacity:0.5;text-decoration:line-through}
 .tpt .live{background:#fff8b3}
+.tpt tbody td:nth-child(3),.tpt tbody td:nth-child(4){white-space:nowrap}
 .tpt .end-time{font-weight:700;color:#d0334d}
 .tpt .start-time{color:#666;font-size:11px}
 .tpt .tpt-empty{color:#aaa;text-align:center;padding:20px}
