@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling + チケット価格表示。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.5.13
+Version: 1.5.14
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -1506,9 +1506,14 @@ function tdrt_render_pass_today($a){
 .tpt th,.tpt td{border:1px solid #e0e0e0;padding:6px 8px;text-align:left;vertical-align:middle}
 .tpt thead th{background:#2a2a3a;color:#fff;font-weight:600;font-size:11px;text-align:center}
 .tpt .pass{white-space:nowrap;display:inline-block;padding:2px 6px;border-radius:3px;color:#fff;font-size:10px;font-weight:700;margin-right:4px}
-.tpt .ended{opacity:0.5;text-decoration:line-through}
+.tpt .ended{color:#666}
+.tpt .pass-status{font-size:12px;line-height:1.7}
+.tpt .pass-status time{white-space:nowrap;font-variant-numeric:tabular-nums}
+.tpt .status-live{color:#285a43;font-weight:600}
+.tpt .status-ended{color:#ad354a;font-weight:600}
 .tpt .live{background:#fff8b3}
-.tpt tbody td:nth-child(3),.tpt tbody td:nth-child(4){white-space:nowrap}
+.tpt tbody td:nth-child(2){white-space:nowrap;width:46px}
+.tpt tbody td:nth-child(3){width:40%}
 .tpt .end-time{font-weight:700;color:#d0334d}
 .tpt .start-time{color:#666;font-size:11px}
 .tpt .tpt-empty{color:#aaa;text-align:center;padding:20px}
@@ -1529,7 +1534,7 @@ function tdrt_render_pass_today($a){
 <p class="tpt-empty">本日の発行記録はまだありません。現在の案内は公式アプリでご確認ください。</p>
 <?php else: ?>
 <table>
-<thead><tr><th>アトラクション</th><th>種別</th><th>発行中を確認</th><th>終了を確認</th><th>確認時の状況</th></tr></thead>
+<thead><tr><th>アトラクション</th><th>種別</th><th>発行状況</th></tr></thead>
 <tbody>
 <?php
 // ソート: 発券中(まだ終わってない)を上に、終わった順を時間降順で
@@ -1562,9 +1567,17 @@ foreach($sorted as $row):
 <tr class="<?php echo $live?'live':'ended';?>">
 <td><?php echo esc_html($row['name']);?></td>
 <td><span class="pass" style="background:<?php echo $type_color[$tp];?>"><?php echo $type_label[$tp];?></span></td>
-<td class="start-time"><?php echo esc_html($start_t);?></td>
-<td class="<?php echo (!$live && $row['end'])?'end-time':'';?>"><?php echo esc_html($end_t);?></td>
-<td><?php echo $live?($is_fresh?'🟢 確認時は発行中':'確認時は発行中'):($row['end']?'終了を確認':'発行終了は未確認');?></td>
+<td class="pass-status <?php echo $live?'status-live':($row['end']?'status-ended':'');?>"><?php
+if($live){
+  // Current issuing status was observed at the latest successful park poll,
+  // not at the day's first start event.
+  echo '<time>'.esc_html(wp_date('H:i',$last)).'</time>'.($is_fresh?'現在 発行中':'時点 発行中');
+}elseif($row['end']){
+  echo '<time>'.esc_html($end_t).'</time> 発行終了';
+}else{
+  echo '発行終了は未確認';
+}
+?></td>
 </tr>
 <?php endforeach;?>
 </tbody>
