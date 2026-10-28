@@ -13,6 +13,7 @@ function tdrt_fix_name($s){return $s;}
 function tdrt_is_open($p){global $open;return $open;}
 function tdrt_get_stopped_attraction_names(){return [];}
 function tdrt_db_hi($v){return date('H:i',strtotime($v));}
+function tdrt_pass_table(){return 'tdr_pass_events';}
 class FakeDB {
  function prepare($s,...$a){return $s;}
  function get_results($s){return [(object)['attr_id'=>'x','attr_name'=>'テスト施設','pass_type'=>'dpa','event'=>'start','event_time'=>date('Y-m-d').' 09:00:00']];}
