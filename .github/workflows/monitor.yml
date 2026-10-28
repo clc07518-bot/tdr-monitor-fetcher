@@ -4,7 +4,7 @@ on:
   schedule:
     # 30-minute interval keeps monthly GHA usage within the 2,000-min free
     # tier for private repos (~1,440 min/month at ~1 min/run).
-    - cron: '0,30 * * * *'
+    - cron: '7,37 * * * *'
   workflow_dispatch:
     inputs:
       backfill:
@@ -19,6 +19,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  availability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+      - name: Install browser dependencies
+        run: python -m playwright install-deps chromium
+      - name: Synchronize official ticket and pass observations first
+        env:
+          WP_BASE: ${{ secrets.WP_BASE }}
+          WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
+          PW_CHANNEL: chrome
+          X_AUTO_POST: '0'
+        run: python availability_poll.py
   closures:
     runs-on: ubuntu-latest
     timeout-minutes: 6
@@ -35,6 +58,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_*.py'
           php -l wp-plugin/tdr-today/tdr-today.php
           php tests/test_closures.php
+          php tests/test_availability.php
       - uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: stable
@@ -90,6 +114,7 @@ jobs:
           WP_INGEST_TOKEN: ${{ secrets.WP_INGEST_TOKEN }}
           PW_CHANNEL: chrome
           SKIP_CLOSURES: '1'
+          SKIP_AVAILABILITY: '1'
           # Restore park data without sending X posts during recovery.
           X_AUTO_POST: '0'
           X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
@@ -105,3 +130,4 @@ jobs:
         with:
           path: .x_state.json
           key: x-state-${{ github.run_id }}
+

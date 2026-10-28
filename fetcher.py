@@ -1196,12 +1196,13 @@ def main() -> int:
                 print(f"[parse] shows {park}: {len(shows[park])} items", file=sys.stderr)
                 # Reuse the same HTML to extract today's 1-day passport prices (fallback).
                 tp = parse_ticket_price(html_show) or {}
-                # Separate verified sale inventory from price-only legacy data.
-                try:
-                    tp["sales_snapshot"] = fetch_ticket_sale_snapshot(page, park, today_ymd_jst)
-                    print(f"[parse] verified ticket sales {park}: {len(tp['sales_snapshot']['items'])}", file=sys.stderr)
-                except Exception as e:
-                    print(f"[warn] ticket sale inventory {park}: {e}", file=sys.stderr)
+                if os.environ.get('SKIP_AVAILABILITY') != '1':
+                    # Separate verified sale inventory from price-only legacy data.
+                    try:
+                        tp["sales_snapshot"] = fetch_ticket_sale_snapshot(page, park, today_ymd_jst)
+                        print(f"[parse] verified ticket sales {park}: {len(tp['sales_snapshot']['items'])}", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[warn] ticket sale inventory {park}: {e}", file=sys.stderr)
                 # Fetch full per-type prices via the official ticket calendar modal.
                 try:
                     full_prices = fetch_full_ticket_prices(page, park, today_ymd_jst)
@@ -1250,26 +1251,27 @@ def main() -> int:
         except Exception as e:
             summary["greetings"] = {"error": f"ingest: {e}"}
 
-        # Realtime: 公式 JSON API (/_/realtime/<park>_attraction.json) を叩く。
-        # HTML 版 /<park>/realtime/ は待ち時間を埋め込まなくなったため使用不可（2026-04-26 確認）。
-        realtime: dict[str, list[dict]] = {}
-        for park in REALTIME_PARENT.keys():
+        if os.environ.get('SKIP_AVAILABILITY') != '1':
+            # Realtime: 公式 JSON API (/_/realtime/<park>_attraction.json) を叩く。
+            # HTML 版 /<park>/realtime/ は待ち時間を埋め込まなくなったため使用不可（2026-04-26 確認）。
+            realtime: dict[str, list[dict]] = {}
+            for park in REALTIME_PARENT.keys():
+                try:
+                    items = fetch_realtime_json(page, park)
+                    realtime[park] = parse_realtime(items)
+                    with_w = sum(1 for r in realtime[park] if r["wait_min"] is not None)
+                    pp = sum(1 for r in realtime[park] if r["has_pp"])
+                    dpa = sum(1 for r in realtime[park] if r["has_dpa"])
+                    sbp = sum(1 for r in realtime[park] if r["has_sbp"])
+                    print(f"[parse] realtime {park}: {len(realtime[park])} items "
+                          f"(with_wait={with_w} pp={pp} dpa={dpa} sbp={sbp})", file=sys.stderr)
+                except Exception as e:
+                    print(f"[warn] realtime {park}: {e}", file=sys.stderr)
+                    realtime[park] = []
             try:
-                items = fetch_realtime_json(page, park)
-                realtime[park] = parse_realtime(items)
-                with_w = sum(1 for r in realtime[park] if r["wait_min"] is not None)
-                pp = sum(1 for r in realtime[park] if r["has_pp"])
-                dpa = sum(1 for r in realtime[park] if r["has_dpa"])
-                sbp = sum(1 for r in realtime[park] if r["has_sbp"])
-                print(f"[parse] realtime {park}: {len(realtime[park])} items "
-                      f"(with_wait={with_w} pp={pp} dpa={dpa} sbp={sbp})", file=sys.stderr)
+                summary["realtime"] = ingest_realtime(realtime)
             except Exception as e:
-                print(f"[warn] realtime {park}: {e}", file=sys.stderr)
-                realtime[park] = []
-        try:
-            summary["realtime"] = ingest_realtime(realtime)
-        except Exception as e:
-            summary["realtime"] = {"error": f"ingest: {e}"}
+                summary["realtime"] = {"error": f"ingest: {e}"}
 
         browser.close()
 
@@ -1375,4 +1377,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
 

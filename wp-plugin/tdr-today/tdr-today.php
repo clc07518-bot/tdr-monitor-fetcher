@@ -2,7 +2,7 @@
 /*
 Plugin Name: TDR Today
 Description: 今日のディズニー情報ハブ + 待ち時間ヒートマップ + DPA/PP発券終了トラッカー + 過去データ集計 + Queue-Times 5分粒度 polling + チケット価格表示。Shortcode [tdr_today_hub], [tdr_today_heatmap], [tdr_pass_today], [tdr_history], [tdr_pass_history].
-Version: 1.5.12
+Version: 1.5.13
 Author: rin
 */
 if(!defined('ABSPATH'))exit;
@@ -849,8 +849,10 @@ function tdrt_ticket_sales_snapshot(){
   $date=wp_date('Ymd'); $snapshot=['date'=>$date,'checked_at'=>0,'parks'=>[]];
   foreach(['tdl','tds'] as $park){
     $value=get_option('tdrt_ticket_sales_v2_'.$date.'_'.$park,null);
-    // Never carry yesterday's inventory or stale prices forward as "on sale".
-    if(!is_array($value) || ($value['date'] ?? '')!==$date || time()-(int)$value['checked_at']>1800) continue;
+    // Keep today's verified observation, but never call an old observation current.
+    $checked=is_array($value)?(int)($value['checked_at']??0):0;
+    if(!is_array($value) || ($value['date'] ?? '')!==$date || !$checked || $checked>time()+60 || wp_date('Ymd',$checked)!==$date) continue;
+    $value['fresh']=time()-$checked<=1800;
     $snapshot['parks'][$park]=$value;
   }
   return $snapshot;
@@ -867,8 +869,10 @@ $all_tickets = tdrt_get_all_ticket_types($park);
 $ticket_today = array_values(array_filter($all_tickets, function($t){ return !empty($t['available']) && !empty($t['prices']); }));
 $ticket_snapshot = tdrt_ticket_sales_snapshot();
 $ticket_verified = isset($ticket_snapshot['parks'][$park]);
-?>
-<h3>💴 今日販売のチケット</h3>
+$ticket_fresh = $ticket_verified && !empty($ticket_snapshot['parks'][$park]['fresh']);
+?><div data-tdrt-date="<?php echo esc_attr(wp_date('Ymd')); ?>">
+<h3>💴 <?php echo $ticket_verified && !$ticket_fresh?'本日確認できたチケット':'今日販売のチケット'; ?></h3>
+<?php if($ticket_verified && !$ticket_fresh): ?><p role="status" style="color:#6d4900;background:#fff7e0;padding:10px">更新が遅れています。以下は<?php echo esc_html(wp_date('H:i',$ticket_snapshot['parks'][$park]['checked_at'])); ?>の公式確認記録です。現在の販売状況は購入前に公式サイトでご確認ください。</p><?php endif; ?>
 <?php if($ticket_today): ?>
 <div style="font-size:13px;background:#fff;margin:8px 0">
 <?php
@@ -882,7 +886,7 @@ foreach($ticket_today as $t):
     <span style="font-size:10px;background:<?php echo $pc;?>;color:#fff;padding:2px 8px;border-radius:10px;font-weight:600"><?php echo esc_html($t['badge']);?></span>
     <strong style="font-size:14px;color:#222"><?php echo esc_html($t['name']);?></strong>
   </div>
-  <p style="margin:4px 0;color:#255d48;font-weight:700"><?php echo esc_html($t['sale_status']);?></p>
+  <p style="margin:4px 0;color:#255d48;font-weight:700"><?php echo $ticket_fresh?'':'最終確認時：'; echo esc_html($t['sale_status']);?></p>
   <table style="width:100%;border-collapse:collapse;font-size:12px;margin:6px 0">
     <thead><tr style="background:#f0f0f1">
       <?php foreach($cat_labels as $k=>$lbl): ?><th style="padding:6px;border:1px solid #e0e0e0;text-align:center"><?php echo esc_html($lbl);?><br><small style="color:#888;font-weight:400"><?php echo esc_html($cat_subs[$k]);?></small></th><?php endforeach; ?>
@@ -905,7 +909,7 @@ foreach($ticket_today as $t):
 <?php endforeach; ?>
 </div>
 <?php elseif($ticket_verified): ?>
-<p>現在、販売中と確認できるチケットはありません。</p>
+<p>この確認時点で販売中のチケットはありませんでした。</p>
 <?php else: ?>
 <p>現在の販売状況を確認できません。<a href="https://www.tokyodisneyresort.jp/ticket/index.html">公式のチケット販売状況</a>をご確認ください。</p>
 <?php endif; ?>
@@ -913,6 +917,7 @@ foreach($ticket_today as $t):
 <p style="font-size:12px;color:#555;margin:4px 0 12px">公式確認：<?php echo esc_html(wp_date('n/j H:i',$ticket_snapshot['parks'][$park]['checked_at']));?>時点。販売中・残りわずかの券種のみ掲載しています。売り切れ・販売対象外の券種は表示しません。販売状況は変動するため、購入直前に公式サイトをご確認ください。</p>
 <?php if(!empty($ticket_snapshot['parks'][$park]['unknown'])): ?><p style="font-size:12px;color:#555">一部券種の販売状況は確認できていません。詳細は公式サイトをご確認ください。</p><?php endif; ?>
 <?php endif; ?>
+</div>
 
 <?php
   return ob_get_clean();
@@ -1200,7 +1205,9 @@ foreach($shows as $sh):
       if(typeof data.html!=='string') throw new Error('ticket response invalid');
       box.innerHTML=data.html;
     }catch(error){
-      box.innerHTML='<h3>💴 今日販売のチケット</h3><p>現在の販売状況を確認できません。<a href="https://www.tokyodisneyresort.jp/ticket/index.html">公式のチケット販売状況</a>をご確認ください。</p>';
+      const day=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format().replace(/-/g,'');
+      if(box.querySelector('[data-tdrt-date]')?.dataset.tdrtDate!==day)box.innerHTML='<h3>💴 今日販売のチケット</h3>';
+      if(!box.querySelector('[data-refresh-error]'))box.insertAdjacentHTML('beforeend','<p data-refresh-error role="status">最新情報への更新に失敗しました。表示中の確認時刻を参照し、現在の販売状況は公式サイトでご確認ください。</p>');
     }finally{ busy=false; }
   }
   refresh();
@@ -1214,14 +1221,7 @@ foreach($shows as $sh):
 // 営業時間外は has_dpa/has_pp フラグが「対応アトラクションかどうか」の static
 // マーカーとして残ってしまい、本来発券していない時間帯でも「発券中」と誤表示
 // するため、open かつ event_time が今日のものだけ表示する。
-if($is_open){
-  echo do_shortcode('[tdr_pass_today park="'.$park.'"]');
-} else {
-?>
-<h3>🎫 <?php echo esc_html($pl);?> パス発券状況</h3>
-<p style="color:#888;text-align:center;padding:16px;background:#f8f8f8;border-radius:8px;font-size:13px">🌙 現在パークは営業時間外です。<br>DPA・スタンバイパスの現在の案内は公式アプリでご確認ください。</p>
-<?php
-}
+echo do_shortcode('[tdr_pass_today park="'.$park.'"]');
 ?>
 
 <div class="cta">
@@ -1458,16 +1458,17 @@ input.addEventListener('input',update);select.addEventListener('change',update);
 add_shortcode('tdr_today_heatmap','tdrt_heatmap');
 
 // ---------- DPA / プライオリティパス 発券タイムライン ----------
-function tdrt_pass_today($a){
+function tdrt_render_pass_today($a){
   global $wpdb;
   $a = shortcode_atts(['park'=>'tdl'], $a, 'tdr_pass_today');
   $park = strtolower($a['park'])==='tds'?'tds':'tdl';
   $pl = $park==='tdl'?'東京ディズニーランド':'東京ディズニーシー';
   $pc = $park==='tdl'?'#1d4f91':'#0a8aa6';
   $today = wp_date('Y-m-d');
-  $last=(int)get_option('tdrt_realtime_last',0);
-  // Current pass availability must never be inferred from a previous day's snapshot.
-  if(!$last || $last<time()-1200 || $last>time()+60 || wp_date('Y-m-d',$last)!==$today){
+  $last=(int)get_option('tdrt_realtime_last_'.$park,get_option('tdrt_realtime_last',0));
+  $is_fresh=$last>0 && time()-$last<=1200;
+  // Yesterday is never current; delayed same-day observations remain explicit history.
+  if(!$last || $last>time()+60 || wp_date('Y-m-d',$last)!==$today){
     return '<div class="tpt"><h3>🎫 DPA・スタンバイパス</h3><p>現在の発行状況は確認できていません。東京ディズニーリゾート公式アプリでご確認ください。</p><p style="font-size:12px">40周年記念プライオリティパスは2026年8月31日で終了しました。<a href="https://www.tokyodisneyresort.jp/tdr/news/update/tdr/202605" target="_blank" rel="noopener noreferrer">公式のお知らせ</a></p></div>';
   }
 
@@ -1527,7 +1528,7 @@ function tdrt_pass_today($a){
 <p class="tpt-empty">本日の発行記録はまだありません。現在の案内は公式アプリでご確認ください。</p>
 <?php else: ?>
 <table>
-<thead><tr><th>アトラクション</th><th>種別</th><th>発券開始</th><th>発券終了</th><th>状況</th></tr></thead>
+<thead><tr><th>アトラクション</th><th>種別</th><th>発行中を確認</th><th>終了を確認</th><th>確認時の状況</th></tr></thead>
 <tbody>
 <?php
 // ソート: 発券中(まだ終わってない)を上に、終わった順を時間降順で
@@ -1562,17 +1563,36 @@ foreach($sorted as $row):
 <td><span class="pass" style="background:<?php echo $type_color[$tp];?>"><?php echo $type_label[$tp];?></span></td>
 <td class="start-time"><?php echo esc_html($start_t);?></td>
 <td class="<?php echo (!$live && $row['end'])?'end-time':'';?>"><?php echo esc_html($end_t);?></td>
-<td><?php echo $live?'🟢 発券中':'🔴 終了';?></td>
+<td><?php echo $live?($is_fresh?'🟢 確認時は発行中':'確認時は発行中'):($row['end']?'終了を確認':'発行終了は未確認');?></td>
 </tr>
 <?php endforeach;?>
 </tbody>
 </table>
 <?php endif;?>
-<?php $last = (int) get_option('tdrt_realtime_last', 0); if($last):?>
+<?php if(!$is_fresh): ?><p role="status" style="color:#6d4900;background:#fff7e0;padding:10px">更新が遅れています。表は本日の最終確認時点の記録で、現在の発行状況ではありません。公式アプリでご確認ください。</p><?php endif; ?>
+<p style="font-size:12px">時刻は定期取得で発行状況を確認した時刻です。実際の発行開始・終了時刻と異なる場合があります。対象はアトラクションの記録です。</p>
+<?php if($last):?>
 <p style="font-size:11px;color:#888;margin-top:6px;text-align:right">最終更新: <?php echo esc_html(wp_date('n月j日 H:i', $last));?></p>
 <?php endif;?>
 </div>
 <?php return ob_get_clean();
+}
+function tdrt_pass_today($a){
+  $park=strtolower($a['park']??'tdl')==='tds'?'tds':'tdl';
+  $id='tdrt-pass-status-'.$park;
+  $endpoint=rest_url('tdr-today/v1/pass-status').'?park='.$park;
+  $html='<section id="'.esc_attr($id).'" data-pass-status data-pass-date="'.esc_attr(wp_date('Ymd')).'">'.tdrt_render_pass_today(['park'=>$park]).'</section>';
+  ob_start(); ?>
+<script>
+(function(){const box=document.getElementById(<?php echo wp_json_encode($id); ?>);if(!box)return;
+const endpoint=<?php echo wp_json_encode($endpoint); ?>;let busy=false;
+async function refresh(){if(busy||document.hidden)return;busy=true;
+try{const r=await fetch(endpoint+'&_cb='+Date.now(),{cache:'no-store',credentials:'same-origin'});if(!r.ok)throw Error();const d=await r.json();if(typeof d.html!=='string')throw Error();box.innerHTML=d.html;box.dataset.passDate=d.date;}
+catch(e){const day=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit'}).format().replace(/-/g,'');if(box.dataset.passDate!==day)box.innerHTML='<h3>🎫 DPA・スタンバイパス</h3>';if(!box.querySelector('[data-refresh-error]'))box.insertAdjacentHTML('beforeend','<p data-refresh-error role="status">最新情報への更新に失敗しました。確認時刻を参照し、現在の発行状況は公式アプリでご確認ください。</p>');}
+finally{busy=false;}}
+refresh();setInterval(refresh,60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});})();
+</script>
+<?php return $html.ob_get_clean();
 }
 add_shortcode('tdr_pass_today','tdrt_pass_today');
 
@@ -1883,8 +1903,9 @@ add_action('rest_api_init', function(){
         }
         wp_cache_delete($waits_key, 'options');
         $stored[$park] = count($rows);
+        update_option('tdrt_realtime_last_'.$park,time(),false);
       }
-      update_option('tdrt_realtime_last', time(), false);
+      if($stored)update_option('tdrt_realtime_last', time(), false);
       return ['ok'=>true, 'stored'=>$stored, 'events_logged'=>$events_logged, 'now'=>time()];
     },
   ]);
@@ -2227,7 +2248,8 @@ add_action('rest_api_init',function(){
       if(!in_array($park,['tdl','tds'],true)) return new WP_Error('bad_park','invalid park',['status'=>400]);
       $html=tdrt_render_ticket_sales($park);
       $snapshot=tdrt_ticket_sales_snapshot();
-      $response=new WP_REST_Response(['date'=>wp_date('Ymd'),'verified'=>isset($snapshot['parks'][$park]),
+      $response=new WP_REST_Response(['date'=>wp_date('Ymd'),'verified'=>isset($snapshot['parks'][$park])&&!empty($snapshot['parks'][$park]['fresh']),
+        'has_snapshot'=>isset($snapshot['parks'][$park]),'fresh'=>!empty($snapshot['parks'][$park]['fresh']),
         'checked_at'=>$snapshot['parks'][$park]['checked_at'] ?? null,'html'=>$html],200);
       $response->header('Cache-Control','no-store, no-cache, must-revalidate, max-age=0');
       return $response;
@@ -2242,6 +2264,22 @@ add_action('rest_api_init',function(){
       $body=$request->get_json_params(); $park=(string)($body['park'] ?? '');
       if(!tdrt_store_ticket_sales($park,$body)) return new WP_Error('invalid_sales','invalid or stale sale snapshot',['status'=>400]);
       return ['ok'=>true,'park'=>$park,'count'=>count($body['items']),'checked_at'=>$body['checked_at']];
+    }
+  ]);
+});
+
+
+// Read-only, cache-independent pass observations. No ingest credentials are exposed.
+add_action('rest_api_init',function(){
+  register_rest_route('tdr-today/v1','/pass-status',[
+    'methods'=>'GET','permission_callback'=>'__return_true',
+    'callback'=>function($request){
+      $park=(string)$request->get_param('park');
+      if(!in_array($park,['tdl','tds'],true))return new WP_Error('bad_park','invalid park',['status'=>400]);
+      $last=(int)get_option('tdrt_realtime_last_'.$park,get_option('tdrt_realtime_last',0));
+      $today=$last && $last<=time()+60 && wp_date('Ymd',$last)===wp_date('Ymd');
+      $r=new WP_REST_Response(['date'=>wp_date('Ymd'),'checked_at'=>$today?$last:null,'fresh'=>$today&&time()-$last<=1200,'html'=>tdrt_render_pass_today(['park'=>$park])],200);
+      $r->header('Cache-Control','no-store, no-cache, must-revalidate, max-age=0');return $r;
     }
   ]);
 });
